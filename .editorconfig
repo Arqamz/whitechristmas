@@ -1,0 +1,56 @@
+# EditorConfig helps maintain consistent coding styles for multiple developers
+# working on the same project across various editors and IDEs
+# https://editorconfig.org
+
+root = true
+
+# Default settings for all files
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# Scala files
+[*.scala]
+indent_size = 2
+
+# Go files
+[*.go]
+indent_size = 4
+indent_style = tab
+
+# Rust files
+[*.rs]
+indent_size = 4
+
+# Makefile (uses tabs)
+[Makefile]
+indent_style = tab
+
+# Shell scripts
+[*.sh]
+indent_size = 2
+
+# YAML files
+[*.{yaml,yml}]
+indent_size = 2
+
+# JSON files
+[*.json]
+indent_size = 2
+
+# Markdown files
+[*.md]
+trim_trailing_whitespace = false
+max_line_length = off
+
+# Nix files
+[*.nix]
+indent_size = 2
+
+# TOML files
+[*.toml]
+indent_size = 2

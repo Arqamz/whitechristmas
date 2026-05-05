@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+package-lock.json
+yarn.lock
+bun.lockb
+
+# Production
+build/
+dist/
+.next/
+out/
+
+# Build artifacts
+target/
+*.class
+*.jar
+.sbt/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Git
+.git/
+.gitignore
+
+# Nix
+result
+result-*
+.envrc
+flake.lock
+
+# Misc
+.env
+.env.local
+.env.*.local

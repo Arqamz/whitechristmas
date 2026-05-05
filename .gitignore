@@ -1,0 +1,64 @@
+# Nix
+result
+result-*
+.direnv/
+.envrc.local
+flake.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# Node.js/Frontend
+node_modules/
+.next/
+out/
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+.bun/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Rust
+target/
+Cargo.lock
+*.class
+*.jar
+
+# Scala
+.scala_dependencies
+.sbt/
+project/target/
+
+# Go
+dist/
+*.bin
+
+# Database
+postgres_data/
+mongo_data/
+*.db
+*.sqlite
+
+# Logs
+*.log
+logs/
+
+# Temporary
+tmp/
+temp/
+.cache/
+notes/
+
+# Dataset
+data/

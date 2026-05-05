@@ -1,0 +1,137 @@
+# Lefthook configuration for git hooks
+# Install hooks: lefthook install
+# Run hooks: lefthook run <hook-name>
+
+# Global settings
+fail: exit_code
+
+# Don't run in CI or when tools aren't available
+skip_output: summary
+
+pre-commit:
+  parallel: false
+  skip:
+    - merge
+    - rebase
+  commands:
+    # Format code first (before linting)
+    format-scala:
+      glob: '*.scala'
+      description: 'Format Scala code with scalafmt'
+      stage_fixed: true
+      run: command -v scalafmt &>/dev/null && scalafmt {staged_files} || true
+
+    format-js:
+      glob: '*.{js,jsx,ts,tsx,json,md}'
+      description: 'Format JavaScript/TypeScript with prettier'
+      stage_fixed: true
+      run: command -v prettier &>/dev/null && prettier --write --print-width=80 {staged_files} || true
+
+    format-nix:
+      glob: '*.nix'
+      description: 'Format Nix with nixfmt'
+      stage_fixed: true
+      run: command -v nixfmt &>/dev/null && nixfmt {staged_files} || true
+
+    format-shell:
+      glob: '*.sh'
+      description: 'Format shell scripts with shfmt'
+      stage_fixed: true
+      run: command -v shfmt &>/dev/null && shfmt -i 2 -w {staged_files} || true
+
+    format-go:
+      glob: '*.go'
+      description: 'Format Go code with gofmt'
+      stage_fixed: true
+      run: command -v gofmt &>/dev/null && gofmt -w {staged_files} || true
+
+    format-rust:
+      glob: '*.rs'
+      description: 'Format Rust code with rustfmt'
+      stage_fixed: true
+      run: command -v rustfmt &>/dev/null && rustfmt --edition 2021 {staged_files} || true
+
+    # Lint Scala
+    lint-scala:
+      glob: '*.scala'
+      description: 'Lint Scala code with scalafmt'
+      run: command -v scalafmt &>/dev/null && scalafmt --check {staged_files} || true
+
+    # Lint JavaScript/TypeScript
+    lint-js:
+      glob: '*.{js,jsx,ts,tsx}'
+      description: 'Lint JavaScript/TypeScript with eslint'
+      run: command -v eslint &>/dev/null && eslint --fix --max-warnings=0 {staged_files} || true
+
+    # Lint Nix
+    lint-nix:
+      glob: '*.nix'
+      description: 'Lint Nix with statix'
+      run: command -v statix &>/dev/null && statix check {staged_files} || true
+
+    # Lint Shell
+    lint-shell:
+      glob: '*.sh'
+      description: 'Lint shell scripts with shellcheck'
+      run: command -v shellcheck &>/dev/null && shellcheck -x {staged_files} || true
+
+    # Lint YAML
+    lint-yaml:
+      glob: '*.{yaml,yml}'
+      description: 'Lint YAML with yamllint'
+      run: command -v yamllint &>/dev/null && yamllint -f parsable {staged_files} || true
+
+    # Lint Go
+    lint-go:
+      glob: '*.go'
+      description: 'Lint Go code with golangci-lint'
+      run: command -v golangci-lint &>/dev/null && golangci-lint run --fix {staged_files} || true
+
+    # Lint Rust
+    lint-rust:
+      glob: '*.rs'
+      description: 'Lint Rust code with clippy'
+      run: command -v cargo &>/dev/null && cargo clippy --all --all-targets --all-features -- -D warnings || true
+
+pre-push:
+  parallel: false
+  skip:
+    - merge
+    - rebase
+  commands:
+    # Comprehensive check before push
+    check-all-scala:
+      description: 'Check all Scala files'
+      run: 'command -v scalafmt &>/dev/null && ([ -d src ] && scalafmt --check src || echo "ℹ No Scala files") || true'
+
+    check-all-js:
+      description: 'Check all JavaScript/TypeScript files'
+      run: 'command -v eslint &>/dev/null && ([ -d src ] && eslint --max-warnings=0 src || echo "ℹ No JS files") || true'
+
+    check-all-go:
+      description: 'Check all Go files'
+      run: 'command -v golangci-lint &>/dev/null && ([ -d src ] && golangci-lint run ./... || echo "ℹ No Go files") || true'
+
+    check-all-rust:
+      description: 'Check all Rust code'
+      run: 'command -v cargo &>/dev/null && ([ -f Cargo.toml ] && cargo clippy --all --all-targets --all-features -- -D warnings && cargo test || echo "ℹ No Rust project") || true'
+
+    check-all-nix:
+      description: 'Check all Nix files'
+      run: 'command -v statix &>/dev/null && (find . -name "*.nix" -not -path "./.git/*" -not -path "./flake.lock" | grep -q . && statix check -- . || echo "ℹ No Nix files") || true'
+
+    check-all-format:
+      description: 'Verify formatting with treefmt'
+      run: 'command -v treefmt &>/dev/null && treefmt --ci || true'
+
+commit-msg:
+  commands:
+    commit-msg-format:
+      description: 'Validate commit message format'
+      run: |
+        LENGTH=$(head -1 {1} | wc -c)
+        if [ $LENGTH -gt 72 ]; then
+          echo "❌ Commit message subject line is too long (>72 chars). Keep it concise."
+          exit 1
+        fi
+        echo "✓ Commit message format valid"
