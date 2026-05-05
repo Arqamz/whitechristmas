@@ -1,0 +1,77 @@
+{
+  "type": "record",
+  "name": "CrimeEvent",
+  "namespace": "com.whitechristmas.events",
+  "doc": "Crime event record for real-time analytics",
+  "fields": [
+    {
+      "name": "event_id",
+      "type": "string",
+      "doc": "Unique event identifier (UUID)"
+    },
+    {
+      "name": "victim_id",
+      "type": [
+        "null",
+        "string"
+      ],
+      "default": null,
+      "doc": "Victim identifier"
+    },
+    {
+      "name": "incident_date",
+      "type": "string",
+      "doc": "Incident date in ISO 8601 format"
+    },
+    {
+      "name": "incident_time",
+      "type": [
+        "null",
+        "string"
+      ],
+      "default": null,
+      "doc": "Incident time HH:MM:SS format"
+    },
+    {
+      "name": "location",
+      "type": [
+        "null",
+        "string"
+      ],
+      "default": null,
+      "doc": "Geographic location/address"
+    },
+    {
+      "name": "district",
+      "type": [
+        "null",
+        "string"
+      ],
+      "default": null,
+      "doc": "Police district"
+    },
+    {
+      "name": "injury_type",
+      "type": [
+        "null",
+        "string"
+      ],
+      "default": null,
+      "doc": "Type of injury (e.g., Homicide, Non-Fatal Shooting)"
+    },
+    {
+      "name": "severity",
+      "type": [
+        "null",
+        "int"
+      ],
+      "default": null,
+      "doc": "Severity level 1-5 (5 = most severe)"
+    },
+    {
+      "name": "processed_timestamp",
+      "type": "long",
+      "doc": "Server processing timestamp (epoch milliseconds)"
+    }
+  ]
+}
