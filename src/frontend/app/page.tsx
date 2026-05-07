@@ -37,7 +37,7 @@ export default function Home() {
     // Connect to WebSocket
     const connectWebSocket = () => {
       try {
-        const ws = new WebSocket('ws://localhost:8080/ws');
+        const ws = new WebSocket('ws://localhost:8081/ws');
 
         ws.onopen = () => {
           setStatus('connected');
@@ -78,7 +78,7 @@ export default function Home() {
     // Poll stats every 2 seconds
     statsIntervalRef.current = setInterval(async () => {
       try {
-        const response = await fetch('http://localhost:8080/stats');
+        const response = await fetch('http://localhost:8081/stats');
         const data = await response.json();
         setStats(data);
       } catch (error) {

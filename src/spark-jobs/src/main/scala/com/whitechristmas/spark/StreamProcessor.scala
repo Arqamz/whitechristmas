@@ -1,120 +1,137 @@
 package com.whitechristmas.spark
 
 import org.apache.spark.sql._
+import org.apache.spark.sql.avro.functions.from_avro
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
 
+import scala.io.Source
+
 /**
- * Minimal Spark Structured Streaming job for processing crime events
- * 
- * Reads from Kafka raw-events topic, performs basic validation and enrichment,
- * and writes results to PostgreSQL and/or Kafka alerts topic
+ * Spark Structured Streaming job for WhiteChristmas pipeline.
+ *
+ * Flow: Kafka raw-events (Avro + Confluent wire format)
+ *         → strip 5-byte header → from_avro → enrich → alerts topic
+ *
+ * Confluent wire format: [0x00][schema_id: 4 bytes BE][avro binary payload]
  */
 object StreamProcessor {
 
   def main(args: Array[String]): Unit = {
-    // Create Spark session with streaming support
     val spark = SparkSession
       .builder()
       .appName("WhiteChristmas-StreamProcessor")
-      .master("local[*]") // Use all available cores
-      .config("spark.sql.streaming.checkpointLocation", "/tmp/spark-checkpoint")
-      .config("spark.sql.streaming.schemaInference", "true")
+      .master("local[*]")
       .config("spark.sql.shuffle.partitions", "4")
       .getOrCreate()
 
-    // Set log level
-    spark.sparkContext.setLogLevel("INFO")
+    spark.sparkContext.setLogLevel("WARN")
 
     println("╔════════════════════════════════════════════════════╗")
     println("║  🎯 WhiteChristmas Spark Stream Processor         ║")
     println("╚════════════════════════════════════════════════════╝")
     println()
 
-    // Configuration
-    val kafkaBrokers = sys.env.getOrElse("KAFKA_BROKERS", "localhost:9092")
-    val inputTopic = "raw-events"
-    val alertsTopic = "alerts"
+    val kafkaBrokers  = sys.env.getOrElse("KAFKA_BROKERS", "localhost:9092")
+    val inputTopic    = "raw-events"
+    val alertsTopic   = "alerts"
     val checkpointDir = "/tmp/spark-checkpoint"
+
+    // Schema path relative to sbt working directory (src/spark-jobs/)
+    val schemaPath = sys.env.getOrElse(
+      "AVRO_SCHEMA_PATH",
+      "../../schemas/crime-event.avsc"
+    )
 
     println(s"📊 Kafka Brokers: $kafkaBrokers")
     println(s"📖 Input Topic:   $inputTopic")
     println(s"📤 Output Topic:  $alertsTopic")
+    println(s"📋 Avro Schema:   $schemaPath")
     println()
 
+    // Load Avro schema string for from_avro()
+    val avroSchemaStr = Source.fromFile(schemaPath).mkString
+    println("✓ Avro schema loaded")
+
+    // UDF: strip the 5-byte Confluent wire format header [magic(1) + schemaId(4)]
+    val stripConfluentHeader = udf((bytes: Array[Byte]) =>
+      if (bytes != null && bytes.length > 5) bytes.slice(5, bytes.length)
+      else bytes
+    )
+
+    spark.udf.register("stripConfluentHeader", stripConfluentHeader)
+
     try {
-      // Read from Kafka with JSON format
-      println("📥 Reading from Kafka...")
-      val df = spark
+      println("📥 Connecting to Kafka...")
+      val raw = spark
         .readStream
         .format("kafka")
         .option("kafka.bootstrap.servers", kafkaBrokers)
         .option("subscribe", inputTopic)
-        .option("startingOffsets", "latest") // Only new messages for demo
+        .option("startingOffsets", "latest")
         .option("failOnDataLoss", "false")
         .load()
 
-      // Parse JSON payload
-      val schema = StructType(Seq(
-        StructField("event_id", StringType),
-        StructField("victim_id", StringType),
-        StructField("incident_date", StringType),
-        StructField("incident_time", StringType),
-        StructField("location", StringType),
-        StructField("district", StringType),
-        StructField("injury_type", StringType),
-        StructField("severity", IntegerType),
-        StructField("processed_timestamp", LongType)
-      ))
-
-      val parsed = df
+      // Strip header, deserialize Avro, flatten to top-level columns
+      val parsed = raw
         .select(
-          col("key").cast(StringType).as("event_id"),
           col("timestamp").as("kafka_timestamp"),
-          from_json(col("value").cast(StringType), schema).as("event")
+          stripConfluentHeader(col("value")).as("avro_payload")
         )
         .select(
-          col("event_id"),
           col("kafka_timestamp"),
-          col("event.*")
+          from_avro(col("avro_payload"), avroSchemaStr).as("event")
+        )
+        .select(
+          col("kafka_timestamp"),
+          col("event.event_id"),
+          col("event.victim_id"),
+          col("event.incident_date"),
+          col("event.incident_time"),
+          col("event.location"),
+          col("event.district"),
+          col("event.injury_type"),
+          col("event.severity"),
+          col("event.processed_timestamp")
         )
 
-      // Add processing timestamp and window information
+      // Enrich: add server-side processing timestamp and lag
       val enriched = parsed
         .withColumn("processed_at", current_timestamp())
-        .withColumn("received_lag_ms", 
-          col("processed_at").cast("long") * 1000 - col("kafka_timestamp"))
+        .withColumn("received_lag_ms",
+          (col("processed_at").cast("long") - col("kafka_timestamp").cast("long")) * 1000)
         .withColumn("is_alert", col("severity") >= 3)
 
-      // Log schema
-      println("\n📋 Event Schema:")
+      println("\n📋 Enriched schema:")
       enriched.printSchema()
 
-      // Write to console (for demo)
-      println("\n📺 Starting streaming output to console...")
+      // Stream 1: console output for debugging
+      println("📺 Starting console output stream...")
       val consoleQuery = enriched
         .writeStream
         .outputMode("append")
         .format("console")
         .option("truncate", "false")
-        .option("numRows", "10")
+        .option("numRows", "5")
         .start()
 
-      // Write high-severity alerts to alerts topic
-      println("🚨 Starting alerts stream to Kafka...")
+      // Stream 2: forward alerts (severity >= 3) to alerts topic as JSON
+      println("🚨 Starting alerts → Kafka stream...")
       val alertsQuery = enriched
         .filter(col("is_alert"))
         .select(
           col("event_id").as("key"),
           to_json(struct(
             col("event_id"),
+            col("victim_id"),
             col("incident_date"),
             col("incident_time"),
             col("location"),
             col("district"),
+            col("injury_type"),
             col("severity"),
-            col("processed_at"),
-            col("received_lag_ms")
+            col("processed_timestamp"),
+            unix_millis(col("processed_at")).as("processed_timestamp_api")
           )).as("value")
         )
         .writeStream
@@ -125,8 +142,8 @@ object StreamProcessor {
         .outputMode("append")
         .start()
 
-      // Alternative: Write aggregated metrics
-      println("📊 Starting metrics aggregation...")
+      // Stream 3: 10-second windowed severity metrics per district
+      println("📊 Starting district metrics stream...")
       val metricsQuery = enriched
         .groupBy(
           window(col("processed_at"), "10 seconds"),
@@ -145,27 +162,19 @@ object StreamProcessor {
 
       println()
       println("═══════════════════════════════════════════════════")
-      println("✅ Spark Streaming Started!")
+      println("✅ All streams started — awaiting events...")
+      println("   Press Ctrl+C to stop")
       println("═══════════════════════════════════════════════════")
-      println()
-      println("📊 Streams Running:")
-      println("  1. Console output (raw events)")
-      println("  2. Alerts to Kafka topic")
-      println("  3. Metrics aggregation")
-      println()
-      println("Press Ctrl+C to stop...")
-      println()
 
-      // Wait for all queries to terminate
       spark.streams.awaitAnyTermination()
 
     } catch {
       case e: Exception =>
-        println(s"❌ Error: ${e.getMessage}")
+        println(s"❌ Fatal error: ${e.getMessage}")
         e.printStackTrace()
     } finally {
       spark.stop()
-      println("\n✓ Spark session closed")
+      println("\n✓ Spark session stopped")
     }
   }
 }

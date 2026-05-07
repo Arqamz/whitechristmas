@@ -75,17 +75,17 @@ done
 # ─── 3. Go API health check ───────────────────────────────────────────────────
 section "Go API Server"
 
-if nc -z localhost 8080 2>/dev/null; then
-  pass "Go API reachable on :8080"
+if nc -z localhost 8081 2>/dev/null; then
+  pass "Go API reachable on :8081"
 
-  HEALTH=$(curl -s http://localhost:8080/health 2>/dev/null)
+  HEALTH=$(curl -s http://localhost:8081/health 2>/dev/null)
   if echo "$HEALTH" | grep -q '"status":"ok"'; then
     pass "Health endpoint returns ok"
   else
     fail "Health endpoint unexpected response: $HEALTH"
   fi
 
-  STATS=$(curl -s http://localhost:8080/stats 2>/dev/null)
+  STATS=$(curl -s http://localhost:8081/stats 2>/dev/null)
   if echo "$STATS" | grep -q '"connected_clients"'; then
     CLIENTS=$(echo "$STATS" | grep -o '"connected_clients":[0-9]*' | grep -o '[0-9]*$')
     pass "Stats endpoint ok ($CLIENTS WebSocket clients connected)"

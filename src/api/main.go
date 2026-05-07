@@ -17,17 +17,19 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
-// CrimeEvent represents a crime alert
+// CrimeEvent represents a crime alert forwarded from Spark via the alerts topic.
+// Fields mirror the JSON written by StreamProcessor's alertsQuery.
 type CrimeEvent struct {
-	EventID              string    `json:"event_id"`
-	VictimID             *string   `json:"victim_id"`
-	IncidentDate         string    `json:"incident_date"`
-	IncidentTime         *string   `json:"incident_time"`
-	Location             *string   `json:"location"`
-	District             *string   `json:"district"`
-	InjuryType           *string   `json:"injury_type"`
-	Severity             *int      `json:"severity"`
-	ProcessedTimestamp   int64     `json:"processed_timestamp"`
+	EventID               string  `json:"event_id"`
+	VictimID              *string `json:"victim_id"`
+	IncidentDate          string  `json:"incident_date"`
+	IncidentTime          *string `json:"incident_time"`
+	Location              *string `json:"location"`
+	District              *string `json:"district"`
+	InjuryType            *string `json:"injury_type"`
+	Severity              *int    `json:"severity"`
+	ProcessedTimestamp    int64   `json:"processed_timestamp"`
+	ProcessedTimestampAPI int64   `json:"processed_timestamp_api,omitempty"`
 }
 
 // WebSocketMessage represents a message sent to WebSocket clients
@@ -175,10 +177,10 @@ func WebSocketHandler(hub *EventHub) http.HandlerFunc {
 // KafkaConsumer reads from Kafka and broadcasts events
 func KafkaConsumer(hub *EventHub, kafkaBrokers, topic string) {
 	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers: []string{kafkaBrokers},
-		Topic:   topic,
-		GroupID: "whitechristmas-api",
-		StartOffset: kafka.LastOffset,
+		Brokers:        []string{kafkaBrokers},
+		Topic:          topic,
+		GroupID:        "whitechristmas-api",
+		StartOffset:    kafka.LastOffset,
 		CommitInterval: time.Second,
 	})
 	defer reader.Close()
@@ -203,9 +205,9 @@ func KafkaConsumer(hub *EventHub, kafkaBrokers, topic string) {
 		hub.BroadcastEvent(&event)
 		reader.CommitMessages(context.Background(), msg)
 
-		log.Printf("📨 Event #%d broadcast: %s (severity: %v)", 
-			hub.GetEventCount(), 
-			event.EventID, 
+		log.Printf("📨 Event #%d broadcast: %s (severity: %v)",
+			hub.GetEventCount(),
+			event.EventID,
 			event.Severity)
 	}
 }
@@ -227,8 +229,8 @@ func StatsHandler(hub *EventHub) http.HandlerFunc {
 func HealthHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		health := map[string]string{
-			"status": "ok",
-			"name":   "WhiteChristmas Event API",
+			"status":  "ok",
+			"name":    "WhiteChristmas Event API",
 			"version": "0.1.0",
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -250,7 +252,7 @@ func main() {
 
 	port := os.Getenv("API_PORT")
 	if port == "" {
-		port = "8080"
+		port = "8081"
 	}
 
 	fmt.Println("╔════════════════════════════════════════════════════╗")

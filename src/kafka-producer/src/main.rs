@@ -1,21 +1,22 @@
 use anyhow::{Context, Result};
+use apache_avro::{Schema, types::Value as AvroValue, to_avro_datum};
 use clap::Parser;
 use rdkafka::client::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-/// Rust Kafka producer for crime event streaming
+/// Rust Kafka producer — CSV → Avro → Schema Registry → Kafka
 #[derive(Parser, Debug)]
 #[command(name = "WhiteChristmas Producer")]
-#[command(about = "Stream crime events from CSV to Kafka")]
+#[command(about = "Stream crime events from CSV to Kafka with Avro serialization")]
 struct Args {
     /// Path to CSV data file
-    #[arg(short, long, default_value = "/data/Violence_Reduction_-_Victims_of_Homicides_and_Non-Fatal_Shootings_20260505.csv")]
+    #[arg(short, long)]
     csv_path: PathBuf,
 
     /// Kafka bootstrap servers
@@ -25,6 +26,10 @@ struct Args {
     /// Kafka topic to publish to
     #[arg(short, long, default_value = "raw-events")]
     topic: String,
+
+    /// Schema Registry URL
+    #[arg(short, long, default_value = "http://localhost:8081")]
+    schema_registry: String,
 
     /// Events per second rate limit
     #[arg(short, long, default_value = "10")]
@@ -39,8 +44,8 @@ struct Args {
     verbose: bool,
 }
 
-/// Crime event from CSV
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// CSV row from Violence_Reduction dataset
+#[derive(Debug, Deserialize)]
 struct CrimeRecord {
     #[serde(rename = "Date")]
     date: Option<String>,
@@ -52,71 +57,86 @@ struct CrimeRecord {
     injury_type: Option<String>,
     #[serde(rename = "District")]
     district: Option<String>,
-    #[serde(rename = "Community Area")]
-    community_area: Option<String>,
     #[serde(rename = "Location Description")]
     location: Option<String>,
-    #[serde(rename = "Latitude")]
-    latitude: Option<String>,
-    #[serde(rename = "Longitude")]
-    longitude: Option<String>,
-    // Additional fields from CSV that might exist
-    #[serde(flatten)]
-    extra: serde_json::Value,
 }
 
-/// Structured crime event for Kafka
-#[derive(Debug, Clone, Serialize)]
-struct CrimeEvent {
-    event_id: String,
-    victim_id: Option<String>,
-    incident_date: String,
-    incident_time: Option<String>,
-    location: Option<String>,
-    district: Option<String>,
-    injury_type: Option<String>,
-    severity: Option<u8>,
-    processed_timestamp: i64,
-}
-
-impl CrimeEvent {
-    /// Convert CSV record to structured event
-    fn from_csv_record(record: CrimeRecord) -> Self {
-        let severity = calculate_severity(&record.injury_type);
-        let processed_timestamp = chrono::Utc::now().timestamp_millis();
-
-        Self {
-            event_id: Uuid::new_v4().to_string(),
-            victim_id: record.victim_name.filter(|s| !s.is_empty()),
-            incident_date: record.date.unwrap_or_else(|| "unknown".to_string()),
-            incident_time: record.time.filter(|s| !s.is_empty()),
-            location: record.location.filter(|s| !s.is_empty()),
-            district: record.district.filter(|s| !s.is_empty()),
-            injury_type: record.injury_type.filter(|s| !s.is_empty()),
-            severity,
-            processed_timestamp,
-        }
-    }
-}
-
-/// Calculate severity from injury type
-fn calculate_severity(injury_type: &Option<String>) -> Option<u8> {
+fn calculate_severity(injury_type: &Option<String>) -> i32 {
     match injury_type.as_deref() {
         Some(s) => {
             let lower = s.to_lowercase();
-            Some(match lower.as_str() {
-                s if s.contains("fatality") || s.contains("fatal") || s.contains("death") => 5,
-                s if s.contains("homicide") => 5,
-                s if s.contains("shooting") => 4,
-                s if s.contains("gunshot") => 4,
-                s if s.contains("head") || s.contains("brain") => 4,
-                s if s.contains("chest") || s.contains("torso") => 3,
-                s if s.contains("leg") || s.contains("arm") => 2,
-                s if s.contains("other") => 1,
-                _ => 2, // Default medium severity
-            })
+            if lower.contains("fatality") || lower.contains("fatal") || lower.contains("homicide") {
+                5
+            } else if lower.contains("shooting") || lower.contains("gunshot") {
+                4
+            } else if lower.contains("head") || lower.contains("brain") || lower.contains("chest") {
+                3
+            } else if lower.contains("leg") || lower.contains("arm") {
+                2
+            } else {
+                1
+            }
         }
-        None => Some(1), // Default low severity
+        None => 1,
+    }
+}
+
+/// Register schema with Confluent Schema Registry and return schema ID.
+/// Uses the TopicNameStrategy subject: `{topic}-value`.
+async fn register_schema(registry_url: &str, topic: &str, schema_json: &str) -> Result<u32> {
+    let subject = format!("{}-value", topic);
+    let url = format!("{}/subjects/{}/versions", registry_url, subject);
+
+    let body = serde_json::json!({ "schema": schema_json });
+
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .header("Content-Type", "application/vnd.schemaregistry.v1+json")
+        .json(&body)
+        .send()
+        .await
+        .context("Failed to reach Schema Registry")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("Schema Registry returned {}: {}", status, text);
+    }
+
+    let json: serde_json::Value = resp.json().await?;
+    let id = json["id"]
+        .as_u64()
+        .context("Schema Registry response missing 'id' field")? as u32;
+
+    Ok(id)
+}
+
+/// Serialize an Avro record and prepend the Confluent wire format header:
+/// [magic byte 0x00] [schema_id: 4 bytes big-endian] [avro binary]
+fn confluent_encode(schema: &Schema, record: AvroValue, schema_id: u32) -> Result<Vec<u8>> {
+    let avro_bytes = to_avro_datum(schema, record)
+        .context("Failed to serialize Avro record")?;
+
+    let mut payload = Vec::with_capacity(5 + avro_bytes.len());
+    payload.push(0x00); // Confluent magic byte
+    payload.extend_from_slice(&schema_id.to_be_bytes());
+    payload.extend_from_slice(&avro_bytes);
+    Ok(payload)
+}
+
+/// Convert an optional String into an Avro union(null | string) value.
+fn opt_string(v: Option<String>) -> AvroValue {
+    match v {
+        Some(s) if !s.is_empty() => AvroValue::Union(1, Box::new(AvroValue::String(s))),
+        _ => AvroValue::Union(0, Box::new(AvroValue::Null)),
+    }
+}
+
+/// Convert an optional i32 into an Avro union(null | int) value.
+fn opt_int(v: Option<i32>) -> AvroValue {
+    match v {
+        Some(i) => AvroValue::Union(1, Box::new(AvroValue::Int(i))),
+        None => AvroValue::Union(0, Box::new(AvroValue::Null)),
     }
 }
 
@@ -124,7 +144,6 @@ fn calculate_severity(injury_type: &Option<String>) -> Option<u8> {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Initialize tracing
     tracing_subscriber::fmt()
         .with_max_level(if args.verbose {
             tracing::Level::DEBUG
@@ -133,23 +152,38 @@ async fn main() -> Result<()> {
         })
         .init();
 
-    info!("🚀 WhiteChristmas Kafka Producer");
-    info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    info!("CSV Path: {}", args.csv_path.display());
-    info!("Kafka Brokers: {}", args.kafka_brokers);
-    info!("Topic: {}", args.topic);
-    info!("Rate Limit: {}/sec", args.events_per_sec);
-    if args.max_events > 0 {
-        info!("Max Events: {}", args.max_events);
-    }
-    info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    info!("");
+    info!("╔════════════════════════════════════════════════════╗");
+    info!("║  🦀 WhiteChristmas Kafka Producer (Rust + Avro)  ║");
+    info!("╚════════════════════════════════════════════════════╝");
+    info!("CSV Path:        {}", args.csv_path.display());
+    info!("Kafka Brokers:   {}", args.kafka_brokers);
+    info!("Topic:           {}", args.topic);
+    info!("Schema Registry: {}", args.schema_registry);
+    info!("Rate Limit:      {}/sec", args.events_per_sec);
 
-    // Verify CSV file exists
     if !args.csv_path.exists() {
-        error!("CSV file not found: {}", args.csv_path.display());
-        return Err(anyhow::anyhow!("CSV file not found"));
+        error!("❌ CSV file not found: {}", args.csv_path.display());
+        anyhow::bail!("CSV file not found");
     }
+
+    // Load Avro schema from the schemas directory relative to this binary's crate root
+    let schema_path = std::env::current_dir()
+        .unwrap_or_default()
+        .join("../../schemas/crime-event.avsc");
+
+    let schema_json = std::fs::read_to_string(&schema_path)
+        .with_context(|| format!("Cannot read schema file: {}", schema_path.display()))?;
+
+    let schema = Schema::parse_str(&schema_json)
+        .context("Failed to parse Avro schema")?;
+    info!("✓ Avro schema loaded");
+
+    // Register schema with Schema Registry
+    info!("Registering schema with Schema Registry at {}...", args.schema_registry);
+    let schema_id = register_schema(&args.schema_registry, &args.topic, &schema_json)
+        .await
+        .context("Schema registration failed")?;
+    info!("✓ Schema registered (id={})", schema_id);
 
     // Create Kafka producer
     let producer: FutureProducer = ClientConfig::new()
@@ -158,78 +192,80 @@ async fn main() -> Result<()> {
         .set("acks", "1")
         .create()
         .context("Failed to create Kafka producer")?;
-
     info!("✓ Kafka producer initialized");
-    info!("");
+    info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    // Read and stream CSV
     let delay_ms = 1000 / args.events_per_sec as u64;
-    let mut event_count = 0;
-    let mut published_count = 0;
+    let mut event_count: usize = 0;
+    let mut published: usize = 0;
 
-    let file = std::fs::File::open(&args.csv_path)
-        .context("Failed to open CSV file")?;
-
+    let file = std::fs::File::open(&args.csv_path).context("Failed to open CSV")?;
     let mut reader = csv::Reader::from_reader(file);
 
-    info!("📖 Reading CSV and streaming to Kafka...");
-    info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    info!("📖 Streaming CSV → Avro → Kafka...");
 
     for result in reader.deserialize() {
         if args.max_events > 0 && event_count >= args.max_events {
             info!("✓ Reached max event limit");
             break;
         }
-
         event_count += 1;
 
-        match result {
-            Ok(record) => {
-                let crime_record: CrimeRecord = record;
-                let event = CrimeEvent::from_csv_record(crime_record);
+        let record: CrimeRecord = match result {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Skipping malformed row {}: {}", event_count, e);
+                continue;
+            }
+        };
 
-                // Serialize to JSON
-                let payload = serde_json::to_string(&event)?;
+        let event_id = Uuid::new_v4().to_string();
+        let severity = calculate_severity(&record.injury_type);
+        let processed_ts = chrono::Utc::now().timestamp_millis();
 
-                // Create Kafka record
-                let record = FutureRecord::to(&args.topic)
-                    .key(&event.event_id)
-                    .payload(&payload);
+        // Build Avro record matching crime-event.avsc
+        let avro_record = AvroValue::Record(vec![
+            ("event_id".into(), AvroValue::String(event_id.clone())),
+            ("victim_id".into(), opt_string(record.victim_name)),
+            ("incident_date".into(), AvroValue::String(
+                record.date.filter(|s| !s.is_empty()).unwrap_or_else(|| "unknown".into()),
+            )),
+            ("incident_time".into(), opt_string(record.time)),
+            ("location".into(), opt_string(record.location)),
+            ("district".into(), opt_string(record.district)),
+            ("injury_type".into(), opt_string(record.injury_type)),
+            ("severity".into(), opt_int(Some(severity))),
+            ("processed_timestamp".into(), AvroValue::Long(processed_ts)),
+        ]);
 
-                // Send to Kafka
-                match producer.send(record, Duration::from_secs(5)).await {
-                    Ok(_) => {
-                        published_count += 1;
-                        if published_count % 100 == 0 || published_count < 10 {
-                            info!("📨 Published event #{}: {}", published_count, event.event_id);
-                        }
-                    }
-                    Err((e, _)) => {
-                        warn!("Failed to publish event: {}", e);
-                    }
+        let payload = match confluent_encode(&schema, avro_record, schema_id) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("Avro encode failed for event {}: {}", event_id, e);
+                continue;
+            }
+        };
+
+        let kafka_record = FutureRecord::to(&args.topic)
+            .key(event_id.as_bytes())
+            .payload(&payload);
+
+        match producer.send(kafka_record, Duration::from_secs(5)).await {
+            Ok(_) => {
+                published += 1;
+                if published <= 10 || published % 100 == 0 {
+                    info!("📨 Published #{}: {} (severity={})", published, &event_id[..8], severity);
                 }
             }
-            Err(e) => {
-                error!("Failed to deserialize CSV record: {}", e);
-            }
-        }
-
-        // Rate limiting
-        if event_count % 100 == 0 {
-            info!("  → Processing event #{}, published: #{}", event_count, published_count);
+            Err((e, _)) => warn!("Kafka send failed: {}", e),
         }
 
         sleep(Duration::from_millis(delay_ms)).await;
     }
 
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    info!("✅ Publishing complete!");
-    info!("   Total records read: {}", event_count);
-    info!("   Successfully published: {}", published_count);
-    info!("");
+    info!("✅ Done! Read: {} rows, Published: {} events", event_count, published);
 
-    // Flush to ensure all messages are sent
     producer.flush(Duration::from_secs(10));
-
     Ok(())
 }
