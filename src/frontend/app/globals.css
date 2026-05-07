@@ -1,37 +1,113 @@
 @import "tailwindcss";
 
+/* ── Base ─────────────────────────────────────────────────────────────────── */
+:root {
+  --bg-base:     #080b14;
+  --bg-card:     #0d1117;
+  --bg-overlay:  rgba(13, 17, 23, 0.9);
+  --border:      #1e2d3d;
+  --border-bright: #2a3f52;
+  --cyan:        #00d4ff;
+  --cyan-dim:    rgba(0, 212, 255, 0.15);
+  --purple:      #7b5ea7;
+  --red:         #ff4e42;
+  --orange:      #ff7b39;
+  --yellow:      #ffd93d;
+  --green:       #3fb950;
+  --text:        #c9d1d9;
+  --text-muted:  #8b949e;
+  --text-dim:    #484f58;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+
 body {
-  background: #0f0f1e;
-  color: #e0e0e0;
-  font-family: system-ui, -apple-system, sans-serif;
+  background: var(--bg-base);
+  color: var(--text);
+  font-family: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace;
+  -webkit-font-smoothing: antialiased;
 }
 
-@layer components {
-  .event-card {
-    @apply bg-gradient-to-br from-slate-800 to-slate-900 border border-slate-700 rounded-lg p-4 hover:border-cyan-500 transition-colors;
-  }
-
-  .severity-5 {
-    @apply bg-red-900/20 border-l-4 border-red-500;
-  }
-
-  .severity-4 {
-    @apply bg-orange-900/20 border-l-4 border-orange-500;
-  }
-
-  .severity-3 {
-    @apply bg-yellow-900/20 border-l-4 border-yellow-500;
-  }
-
-  .severity-2 {
-    @apply bg-blue-900/20 border-l-4 border-blue-500;
-  }
-
-  .severity-1 {
-    @apply bg-gray-900/20 border-l-4 border-gray-500;
-  }
-
-  .badge {
-    @apply inline-block px-2 py-1 text-xs font-semibold rounded bg-slate-700 text-slate-200;
-  }
+/* ── Scrollbar ────────────────────────────────────────────────────────────── */
+.custom-scroll::-webkit-scrollbar { width: 3px; }
+.custom-scroll::-webkit-scrollbar-track { background: transparent; }
+.custom-scroll::-webkit-scrollbar-thumb {
+  background: var(--border-bright);
+  border-radius: 2px;
 }
+.custom-scroll::-webkit-scrollbar-thumb:hover { background: var(--cyan-dim); }
+
+/* ── Glow effects ─────────────────────────────────────────────────────────── */
+.glow-cyan  { box-shadow: 0 0 24px rgba(0,212,255,0.12), 0 0 48px rgba(0,212,255,0.04); }
+.glow-red   { box-shadow: 0 0 20px rgba(255,78,66,0.18),  0 0 40px rgba(255,78,66,0.06); }
+.glow-pulse { animation: glow-pulse 2s ease-in-out infinite; }
+
+@keyframes glow-pulse {
+  0%,100% { box-shadow: 0 0 6px rgba(255,78,66,0.3); }
+  50%      { box-shadow: 0 0 20px rgba(255,78,66,0.7), 0 0 40px rgba(255,78,66,0.2); }
+}
+
+/* ── Metric value pop animation ───────────────────────────────────────────── */
+@keyframes pop {
+  0%   { transform: scale(1.15); opacity: 0.6; }
+  100% { transform: scale(1);    opacity: 1; }
+}
+.animate-pop { animation: pop 0.25s ease-out; }
+
+/* ── Scan line on live header ─────────────────────────────────────────────── */
+@keyframes scan {
+  from { top: 0%; }
+  to   { top: 100%; }
+}
+.scan-line {
+  position: relative;
+  overflow: hidden;
+}
+.scan-line::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(0,212,255,0.25), transparent);
+  animation: scan 6s linear infinite;
+  pointer-events: none;
+}
+
+/* ── Blink cursor ─────────────────────────────────────────────────────────── */
+@keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+.cursor::after {
+  content: '▮';
+  color: var(--cyan);
+  animation: blink 1s step-start infinite;
+  margin-left: 2px;
+}
+
+/* ── Event card slide-in ──────────────────────────────────────────────────── */
+@keyframes slide-in {
+  from { opacity: 0; transform: translateX(12px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.slide-in { animation: slide-in 0.2s ease-out; }
+
+/* ── Leaflet dark-mode overrides ──────────────────────────────────────────── */
+.leaflet-container { background: #080b14 !important; }
+.leaflet-control-attribution { background: rgba(8,11,20,0.8) !important; color: #484f58 !important; }
+.leaflet-control-attribution a { color: #8b949e !important; }
+.leaflet-control-zoom a {
+  background: #0d1117 !important;
+  color: #8b949e !important;
+  border-color: #1e2d3d !important;
+}
+.leaflet-control-zoom a:hover { color: #00d4ff !important; }
+.leaflet-popup-content-wrapper {
+  background: #0d1117 !important;
+  border: 1px solid #1e2d3d !important;
+  border-radius: 4px !important;
+  box-shadow: 0 0 20px rgba(0,212,255,0.15) !important;
+  color: #c9d1d9 !important;
+}
+.leaflet-popup-tip { background: #0d1117 !important; }
+.leaflet-popup-close-button { color: #8b949e !important; }

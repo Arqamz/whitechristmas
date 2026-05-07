@@ -2,8 +2,9 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'WhiteChristmas',
-  description: 'Real-time Crime Analytics & Intelligent Alert System',
+  title: 'WhiteChristmas — Real-Time Crime Analytics',
+  description:
+    'Real-time Crime Analytics & Intelligent Alert System powered by Rust, Kafka, Spark, Go, and Next.js',
 };
 
 export default function RootLayout({
@@ -13,7 +14,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className="bg-gray-900 text-gray-100">{children}</body>
+      <body>{children}</body>
     </html>
   );
 }

@@ -10,6 +10,8 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "echarts": "^6.0.0",
+    "leaflet": "^1.9.4",
     "next": "^15.1.3",
     "react": "^19.0.0-rc.1",
     "react-dom": "^19.0.0-rc.1"
@@ -19,6 +21,7 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.4",
+    "@types/leaflet": "^1.9.21",
     "@types/node": "^20.10.6",
     "@types/react": "^19.0.0-rc.1",
     "@types/react-dom": "^19.0.0-rc.1",

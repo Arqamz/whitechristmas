@@ -1,6 +1,16 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import dynamic from 'next/dynamic';
+import * as echarts from 'echarts';
+import type { DistrictStat } from './components/DistrictMap';
+
+const DistrictMap = dynamic(() => import('./components/DistrictMap'), {
+  ssr: false,
+  loading: () => <MapPlaceholder />,
+});
+
+// ── Types ──────────────────────────────────────────────────────────────────
 
 interface CrimeEvent {
   event_id: string;
@@ -12,6 +22,7 @@ interface CrimeEvent {
   injury_type?: string;
   severity?: number;
   processed_timestamp: number;
+  processed_timestamp_api?: number;
 }
 
 interface Stats {
@@ -20,6 +31,382 @@ interface Stats {
   timestamp: number;
 }
 
+interface Trend {
+  hour: string;
+  event_count: number;
+  avg_severity: number;
+}
+
+// ── Constants ──────────────────────────────────────────────────────────────
+
+const API = 'http://localhost:8081';
+const WS = 'ws://localhost:8081/ws';
+
+const SEV: Record<number, { label: string; color: string; dim: string }> = {
+  5: { label: 'CRITICAL', color: '#ff4e42', dim: 'rgba(255,78,66,0.15)' },
+  4: { label: 'HIGH', color: '#ff7b39', dim: 'rgba(255,123,57,0.12)' },
+  3: { label: 'MEDIUM', color: '#ffd93d', dim: 'rgba(255,217,61,0.10)' },
+  2: { label: 'LOW', color: '#3fb950', dim: 'rgba(63,185,80,0.10)' },
+  1: { label: 'INFO', color: '#4d96ff', dim: 'rgba(77,150,255,0.10)' },
+};
+
+const sev = (n?: number) => SEV[n ?? 1] ?? SEV[1];
+
+// ── Reusable ECharts hook ─────────────────────────────────────────────────
+
+function useEChart(
+  ref: React.RefObject<HTMLDivElement | null>,
+  getOption: () => echarts.EChartsCoreOption,
+  deps: unknown[]
+) {
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+
+    let chart = echarts.getInstanceByDom(el) as echarts.ECharts | undefined;
+    if (!chart) chart = echarts.init(el, undefined, { renderer: 'canvas' });
+
+    chart.setOption(getOption(), { notMerge: true });
+
+    const ro = new ResizeObserver(() => chart?.resize());
+    ro.observe(el);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+}
+
+// ── Sub-components ─────────────────────────────────────────────────────────
+
+function MapPlaceholder() {
+  return (
+    <div
+      className="w-full h-full flex items-center justify-center text-xs"
+      style={{ color: 'var(--text-dim)' }}
+    >
+      Loading map…
+    </div>
+  );
+}
+
+interface MetricCardProps {
+  label: string;
+  value: number | string;
+  sub?: string;
+  color: string;
+  pulse?: boolean;
+}
+function MetricCard({ label, value, sub, color, pulse }: MetricCardProps) {
+  const prevRef = useRef(value);
+  const [popKey, setPopKey] = useState(0);
+
+  useEffect(() => {
+    if (prevRef.current !== value) {
+      prevRef.current = value;
+      setPopKey((k) => k + 1);
+    }
+  }, [value]);
+
+  return (
+    <div
+      className={`rounded border p-3 flex flex-col gap-1 ${pulse ? 'glow-pulse' : 'glow-cyan'}`}
+      style={{ background: 'var(--bg-card)', borderColor: 'var(--border)' }}
+    >
+      <span
+        className="text-[10px] uppercase tracking-widest"
+        style={{ color: 'var(--text-muted)' }}
+      >
+        {label}
+      </span>
+      <span
+        key={popKey}
+        className="text-2xl font-bold animate-pop tabular-nums"
+        style={{ color }}
+      >
+        {value}
+      </span>
+      {sub && (
+        <span className="text-[10px]" style={{ color: 'var(--text-dim)' }}>
+          {sub}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function SeverityBadge({ severity }: { severity?: number }) {
+  const s = sev(severity);
+  return (
+    <span
+      className="text-[9px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider"
+      style={{
+        color: s.color,
+        background: s.dim,
+        border: `1px solid ${s.color}40`,
+      }}
+    >
+      {s.label}
+    </span>
+  );
+}
+
+function AlertCard({ event }: { event: CrimeEvent }) {
+  const s = sev(event.severity);
+  const ts = new Date(
+    event.processed_timestamp_api ?? event.processed_timestamp
+  ).toLocaleTimeString('en-US', { hour12: false });
+
+  return (
+    <div
+      className="slide-in rounded border-l-2 px-3 py-2 text-xs flex flex-col gap-1.5"
+      style={{
+        background: s.dim,
+        borderLeftColor: s.color,
+        borderTop: '1px solid rgba(255,255,255,0.04)',
+        borderRight: '1px solid rgba(255,255,255,0.04)',
+        borderBottom: '1px solid rgba(255,255,255,0.04)',
+      }}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <code className="text-[10px] opacity-50">
+          {event.event_id.slice(0, 12)}…
+        </code>
+        <div className="flex items-center gap-2">
+          <SeverityBadge severity={event.severity} />
+          <span className="opacity-40">{ts}</span>
+        </div>
+      </div>
+      <div
+        className="grid grid-cols-2 gap-x-4 gap-y-0.5"
+        style={{ color: 'var(--text-muted)' }}
+      >
+        {event.district && (
+          <div>
+            <span className="opacity-50">DIST </span>
+            <span style={{ color: 'var(--text)' }}>{event.district}</span>
+          </div>
+        )}
+        {event.incident_date && (
+          <div>
+            <span className="opacity-50">DATE </span>
+            <span style={{ color: 'var(--text)' }}>{event.incident_date}</span>
+          </div>
+        )}
+        {event.injury_type && (
+          <div className="col-span-2">
+            <span className="opacity-50">TYPE </span>
+            <span style={{ color: s.color }}>{event.injury_type}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Charts ─────────────────────────────────────────────────────────────────
+
+const CHART_BASE: echarts.EChartsCoreOption = {
+  backgroundColor: 'transparent',
+  textStyle: { color: '#8b949e', fontFamily: 'monospace', fontSize: 10 },
+  animation: false,
+};
+
+function TrendsChart({ trends }: { trends: Trend[] }) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEChart(
+    ref,
+    () => ({
+      ...CHART_BASE,
+      grid: { left: 36, right: 8, top: 8, bottom: 28 },
+      xAxis: {
+        type: 'category',
+        data: trends.map((t) => {
+          const h = new Date(t.hour);
+          return `${h.getHours().toString().padStart(2, '0')}:00`;
+        }),
+        axisLine: { lineStyle: { color: '#1e2d3d' } },
+        axisTick: { show: false },
+        axisLabel: { color: '#8b949e', fontSize: 9, interval: 'auto' },
+      },
+      yAxis: {
+        type: 'value',
+        axisLine: { show: false },
+        axisTick: { show: false },
+        splitLine: { lineStyle: { color: '#1e2d3d', type: 'dashed' } },
+        axisLabel: { color: '#8b949e', fontSize: 9 },
+        minInterval: 1,
+      },
+      series: [
+        {
+          type: 'line',
+          data: trends.map((t) => t.event_count),
+          smooth: true,
+          symbol: 'none',
+          lineStyle: { color: '#00d4ff', width: 2 },
+          areaStyle: {
+            color: {
+              type: 'linear',
+              x: 0,
+              y: 0,
+              x2: 0,
+              y2: 1,
+              colorStops: [
+                { offset: 0, color: 'rgba(0,212,255,0.35)' },
+                { offset: 1, color: 'rgba(0,212,255,0.0)' },
+              ],
+            },
+          },
+        },
+      ],
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: '#0d1117',
+        borderColor: '#1e2d3d',
+        textStyle: { color: '#c9d1d9', fontFamily: 'monospace', fontSize: 11 },
+      },
+    }),
+    [trends]
+  );
+
+  return <div ref={ref} className="w-full h-full" />;
+}
+
+function SeverityChart({ events }: { events: CrimeEvent[] }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const counts = [1, 2, 3, 4, 5].map(
+    (s) => events.filter((e) => e.severity === s).length
+  );
+  const total = counts.reduce((a, b) => a + b, 0);
+
+  useEChart(
+    ref,
+    () => ({
+      ...CHART_BASE,
+      series: [
+        {
+          type: 'pie',
+          radius: ['52%', '78%'],
+          center: ['50%', '52%'],
+          data: [1, 2, 3, 4, 5]
+            .map((s) => ({
+              value: counts[s - 1],
+              name: SEV[s].label,
+              itemStyle: { color: SEV[s].color },
+            }))
+            .filter((d) => d.value > 0),
+          label: { show: false },
+          emphasis: {
+            label: {
+              show: true,
+              color: '#c9d1d9',
+              fontSize: 11,
+              fontWeight: 'bold',
+              fontFamily: 'monospace',
+            },
+          },
+        },
+      ],
+      graphic: [
+        {
+          type: 'text',
+          left: 'center',
+          top: 'middle',
+          style: {
+            text: total > 0 ? String(total) : '—',
+            fill: '#c9d1d9',
+            fontSize: total >= 1000 ? 14 : 18,
+            fontWeight: 'bold',
+            fontFamily: 'monospace',
+          },
+        },
+      ],
+      tooltip: {
+        trigger: 'item',
+        backgroundColor: '#0d1117',
+        borderColor: '#1e2d3d',
+        textStyle: { color: '#c9d1d9', fontFamily: 'monospace', fontSize: 11 },
+        formatter: '{b}: {c} ({d}%)',
+      },
+    }),
+    [events.length]
+  );
+
+  return <div ref={ref} className="w-full h-full" />;
+}
+
+function DistrictChart({ districts }: { districts: DistrictStat[] }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const top = [...districts].slice(0, 8).reverse();
+
+  useEChart(
+    ref,
+    () => ({
+      ...CHART_BASE,
+      grid: { left: 44, right: 28, top: 4, bottom: 20 },
+      xAxis: {
+        type: 'value',
+        axisLabel: { color: '#8b949e', fontSize: 9 },
+        splitLine: { lineStyle: { color: '#1e2d3d', type: 'dashed' } },
+        minInterval: 1,
+      },
+      yAxis: {
+        type: 'category',
+        data: top.map((d) => d.district ?? '?'),
+        axisLine: { lineStyle: { color: '#1e2d3d' } },
+        axisTick: { show: false },
+        axisLabel: { color: '#8b949e', fontSize: 9 },
+      },
+      series: [
+        {
+          type: 'bar',
+          data: top.map((d) => ({
+            value: d.total_events,
+            itemStyle: {
+              color:
+                d.avg_severity >= 4
+                  ? '#ff4e42'
+                  : d.avg_severity >= 3
+                    ? '#ffd93d'
+                    : '#00d4ff',
+              borderRadius: [0, 2, 2, 0],
+            },
+          })),
+          barMaxWidth: 14,
+          label: {
+            show: true,
+            position: 'right',
+            color: '#8b949e',
+            fontSize: 9,
+            fontFamily: 'monospace',
+          },
+        },
+      ],
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: '#0d1117',
+        borderColor: '#1e2d3d',
+        textStyle: { color: '#c9d1d9', fontFamily: 'monospace', fontSize: 11 },
+      },
+    }),
+    [districts]
+  );
+
+  return <div ref={ref} className="w-full h-full" />;
+}
+
+function EmptyChart({ label }: { label: string }) {
+  return (
+    <div
+      className="w-full h-full flex items-center justify-center text-[10px]"
+      style={{ color: 'var(--text-dim)' }}
+    >
+      {label}
+    </div>
+  );
+}
+
+// ── Main page ──────────────────────────────────────────────────────────────
+
 export default function Home() {
   const [events, setEvents] = useState<CrimeEvent[]>([]);
   const [stats, setStats] = useState<Stats>({
@@ -27,234 +414,344 @@ export default function Home() {
     total_events: 0,
     timestamp: 0,
   });
-  const [status, setStatus] = useState<
+  const [wsStatus, setWsStatus] = useState<
     'connecting' | 'connected' | 'disconnected'
   >('disconnected');
-  const wsRef = useRef<WebSocket | null>(null);
-  const statsIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const [districts, setDistricts] = useState<DistrictStat[]>([]);
+  const [trends, setTrends] = useState<Trend[]>([]);
+  const [clock, setClock] = useState('');
 
+  const tsBuffer = useRef<number[]>([]);
+
+  // Clock
   useEffect(() => {
-    // Connect to WebSocket
-    const connectWebSocket = () => {
-      try {
-        const ws = new WebSocket('ws://localhost:8081/ws');
-
-        ws.onopen = () => {
-          setStatus('connected');
-          console.log('✓ Connected to WebSocket');
-        };
-
-        ws.onmessage = (event) => {
-          const message = JSON.parse(event.data);
-
-          if (message.type === 'event') {
-            setEvents((prev) => [
-              message.data as CrimeEvent,
-              ...prev.slice(0, 99),
-            ]);
-          }
-        };
-
-        ws.onerror = (error) => {
-          console.error('WebSocket error:', error);
-          setStatus('disconnected');
-        };
-
-        ws.onclose = () => {
-          setStatus('disconnected');
-          // Attempt to reconnect after 3 seconds
-          setTimeout(connectWebSocket, 3000);
-        };
-
-        wsRef.current = ws;
-      } catch (error) {
-        console.error('Failed to connect:', error);
-        setStatus('disconnected');
-      }
-    };
-
-    connectWebSocket();
-
-    // Poll stats every 2 seconds
-    statsIntervalRef.current = setInterval(async () => {
-      try {
-        const response = await fetch('http://localhost:8081/stats');
-        const data = await response.json();
-        setStats(data);
-      } catch (error) {
-        console.error('Failed to fetch stats:', error);
-      }
-    }, 2000);
-
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
-      if (statsIntervalRef.current) {
-        clearInterval(statsIntervalRef.current);
-      }
-    };
+    const tick = () =>
+      setClock(new Date().toLocaleTimeString('en-US', { hour12: false }));
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
   }, []);
 
-  const getSeverityColor = (severity?: number) => {
-    switch (severity) {
-      case 5:
-        return 'severity-5';
-      case 4:
-        return 'severity-4';
-      case 3:
-        return 'severity-3';
-      case 2:
-        return 'severity-2';
-      default:
-        return 'severity-1';
-    }
-  };
+  // WebSocket
+  const connectWS = useCallback(() => {
+    setWsStatus('connecting');
+    const ws = new WebSocket(WS);
 
-  const getSeverityLabel = (severity?: number) => {
-    switch (severity) {
-      case 5:
-        return 'CRITICAL';
-      case 4:
-        return 'HIGH';
-      case 3:
-        return 'MEDIUM';
-      case 2:
-        return 'LOW';
-      default:
-        return 'INFO';
-    }
-  };
+    ws.onopen = () => setWsStatus('connected');
+
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'event') {
+        const ev = msg.data as CrimeEvent;
+        tsBuffer.current.push(Date.now());
+        setEvents((prev) => [ev, ...prev.slice(0, 149)]);
+      }
+    };
+
+    ws.onclose = () => {
+      setWsStatus('disconnected');
+      setTimeout(connectWS, 3000);
+    };
+
+    ws.onerror = () => ws.close();
+  }, []);
+
+  useEffect(() => {
+    connectWS();
+  }, [connectWS]);
+
+  // Stats poll (2 s)
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const r = await fetch(`${API}/stats`);
+        if (r.ok) setStats(await r.json());
+      } catch {}
+    };
+    poll();
+    const id = setInterval(poll, 2000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Districts poll (15 s)
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const r = await fetch(`${API}/districts/summary`);
+        if (r.ok) {
+          const data = await r.json();
+          setDistricts(data.districts ?? []);
+        }
+      } catch {}
+    };
+    poll();
+    const id = setInterval(poll, 15_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Trends poll (30 s)
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const r = await fetch(`${API}/analytics/trends?hours=24`);
+        if (r.ok) {
+          const data = await r.json();
+          setTrends(data.trends ?? []);
+        }
+      } catch {}
+    };
+    poll();
+    const id = setInterval(poll, 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Derived metrics
+  const eventsPerMin = (() => {
+    const cutoff = Date.now() - 60_000;
+    tsBuffer.current = tsBuffer.current.filter((t) => t > cutoff);
+    return tsBuffer.current.length;
+  })();
+
+  const activeDistricts = new Set(
+    events
+      .filter(
+        (e) =>
+          Date.now() - (e.processed_timestamp_api ?? e.processed_timestamp) <
+          300_000
+      )
+      .map((e) => e.district)
+      .filter(Boolean)
+  ).size;
+
+  const criticalCount = events.filter((e) => (e.severity ?? 0) >= 4).length;
 
   const statusColor =
-    status === 'connected'
-      ? 'bg-green-500'
-      : status === 'connecting'
-        ? 'bg-yellow-500'
-        : 'bg-red-500';
+    wsStatus === 'connected'
+      ? '#00d4ff'
+      : wsStatus === 'connecting'
+        ? '#ffd93d'
+        : '#ff4e42';
 
   return (
-    <main className="min-h-screen bg-gradient-to-br from-gray-900 via-slate-900 to-gray-900 p-4">
-      <div className="max-w-6xl mx-auto">
-        {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-4xl font-bold text-white mb-2 flex items-center gap-3">
-            <span className="text-2xl">🚨</span> WhiteChristmas
-          </h1>
-          <p className="text-gray-400">
-            Real-time Crime Analytics & Intelligent Alert System
-          </p>
+    <div
+      className="h-screen flex flex-col overflow-hidden scan-line"
+      style={{ background: 'var(--bg-base)', color: 'var(--text)' }}
+    >
+      {/* Header */}
+      <header
+        className="flex-none flex items-center justify-between px-5 py-2.5 border-b"
+        style={{ borderColor: 'var(--border)', background: 'var(--bg-card)' }}
+      >
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <span style={{ color: 'var(--cyan)', fontSize: 18 }}>⬡</span>
+            <span className="font-bold tracking-widest text-sm uppercase">
+              WhiteChristmas
+            </span>
+          </div>
+          <span style={{ color: 'var(--border-bright)' }}>│</span>
+          <span
+            className="text-[10px] uppercase tracking-wider"
+            style={{ color: 'var(--text-muted)' }}
+          >
+            Real-Time Crime Analytics &amp; Intelligent Alert System
+          </span>
         </div>
 
-        {/* Status Bar */}
-        <div className="bg-slate-800 border border-slate-700 rounded-lg p-4 mb-8">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <div className="flex items-center gap-2">
-                <div
-                  className={`w-3 h-3 rounded-full ${statusColor} animate-pulse`}
-                />
-                <span className="text-sm font-medium capitalize">
-                  {status === 'connected' ? 'Connected' : 'Disconnected'}
-                </span>
-              </div>
-              <div className="text-sm text-gray-400">|</div>
-              <div className="text-sm">
-                👥 <strong>{stats.connected_clients}</strong> clients
-              </div>
-              <div className="text-sm">
-                📊 <strong>{stats.total_events}</strong> events
-              </div>
-            </div>
-            <div className="text-xs text-gray-500">
-              {new Date(stats.timestamp).toLocaleTimeString()}
-            </div>
+        <div className="flex items-center gap-5">
+          <div className="flex items-center gap-2">
+            <div
+              className="w-2 h-2 rounded-full"
+              style={{
+                background: statusColor,
+                boxShadow: `0 0 6px ${statusColor}`,
+                animation:
+                  wsStatus === 'connected'
+                    ? 'glow-pulse 2s ease-in-out infinite'
+                    : 'none',
+              }}
+            />
+            <span
+              className="text-[10px] uppercase tracking-wider"
+              style={{ color: statusColor }}
+            >
+              {wsStatus}
+            </span>
+          </div>
+          <span
+            className="text-[11px] cursor"
+            style={{ color: 'var(--text-muted)' }}
+          >
+            {clock}
+          </span>
+        </div>
+      </header>
+
+      {/* Metrics */}
+      <div
+        className="flex-none grid grid-cols-4 gap-3 px-5 py-3 border-b"
+        style={{ borderColor: 'var(--border)' }}
+      >
+        <MetricCard
+          label="Total Events"
+          value={stats.total_events.toLocaleString()}
+          sub={`${stats.connected_clients} client${stats.connected_clients !== 1 ? 's' : ''} connected`}
+          color="var(--cyan)"
+        />
+        <MetricCard
+          label="Events / Min"
+          value={eventsPerMin}
+          sub="last 60 seconds"
+          color="#7b5ea7"
+        />
+        <MetricCard
+          label="Active Districts"
+          value={activeDistricts}
+          sub="last 5 minutes"
+          color="#4d96ff"
+        />
+        <MetricCard
+          label="Critical Alerts"
+          value={criticalCount}
+          sub="severity ≥ 4"
+          color="var(--red)"
+          pulse={criticalCount > 0}
+        />
+      </div>
+
+      {/* Map + Feed */}
+      <div className="flex-1 flex min-h-0">
+        {/* Map */}
+        <div
+          className="flex-none w-[44%] flex flex-col border-r"
+          style={{ borderColor: 'var(--border)' }}
+        >
+          <div
+            className="flex-none px-3 py-1.5 flex items-center justify-between border-b"
+            style={{
+              borderColor: 'var(--border)',
+              background: 'var(--bg-card)',
+            }}
+          >
+            <span
+              className="text-[10px] uppercase tracking-wider"
+              style={{ color: 'var(--text-muted)' }}
+            >
+              Chicago District Map
+            </span>
+            <span className="text-[10px]" style={{ color: 'var(--text-dim)' }}>
+              {districts.length > 0
+                ? `${districts.length} districts reporting`
+                : 'awaiting data…'}
+            </span>
+          </div>
+          <div className="flex-1 min-h-0">
+            <DistrictMap districts={districts} />
           </div>
         </div>
 
-        {/* Events Feed */}
-        <div className="space-y-3">
-          <h2 className="text-xl font-bold text-white mb-4">
-            📖 Live Event Feed
-          </h2>
-
-          {events.length === 0 ? (
-            <div className="bg-slate-800 border border-slate-700 rounded-lg p-8 text-center">
-              <p className="text-gray-400">
-                {status === 'connected'
-                  ? 'Waiting for events...'
-                  : 'Connect to see events'}
-              </p>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {events.map((event, idx) => (
-                <div
-                  key={`${event.event_id}-${idx}`}
-                  className={`event-card ${getSeverityColor(event.severity)}`}
-                >
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-3 mb-2">
-                        <code className="text-xs text-cyan-400 font-mono bg-black/30 px-2 py-1 rounded">
-                          {event.event_id.slice(0, 8)}...
-                        </code>
-                        <span
-                          className={`badge ${getSeverityColor(event.severity)}`}
-                        >
-                          {getSeverityLabel(event.severity)}
-                        </span>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-4 text-sm">
-                        <div>
-                          <span className="text-gray-400">Date:</span>{' '}
-                          <span className="text-white font-medium">
-                            {event.incident_date} {event.incident_time || ''}
-                          </span>
-                        </div>
-                        <div>
-                          <span className="text-gray-400">District:</span>{' '}
-                          <span className="text-white font-medium">
-                            {event.district || 'Unknown'}
-                          </span>
-                        </div>
-                        <div>
-                          <span className="text-gray-400">Location:</span>{' '}
-                          <span className="text-white font-medium">
-                            {event.location || 'Unknown'}
-                          </span>
-                        </div>
-                        <div>
-                          <span className="text-gray-400">Type:</span>{' '}
-                          <span className="text-white font-medium">
-                            {event.injury_type || 'Unknown'}
-                          </span>
-                        </div>
-                      </div>
-
-                      {event.victim_id && (
-                        <div className="text-xs text-gray-400 mt-2">
-                          Victim: {event.victim_id}
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="text-xs text-gray-500 text-right">
-                      {new Date(event.processed_timestamp).toLocaleTimeString()}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Footer */}
-        <div className="mt-12 text-center text-xs text-gray-600 border-t border-slate-800 pt-8">
-          <p>WhiteChristmas v0.1.0</p>
+        {/* Feed */}
+        <div className="flex-1 flex flex-col min-w-0">
+          <div
+            className="flex-none px-3 py-1.5 flex items-center justify-between border-b"
+            style={{
+              borderColor: 'var(--border)',
+              background: 'var(--bg-card)',
+            }}
+          >
+            <span
+              className="text-[10px] uppercase tracking-wider"
+              style={{ color: 'var(--text-muted)' }}
+            >
+              Live Alert Feed
+            </span>
+            <span className="text-[10px]" style={{ color: 'var(--text-dim)' }}>
+              {events.length > 0
+                ? `${events.length} in buffer`
+                : 'waiting for events…'}
+            </span>
+          </div>
+          <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1.5 custom-scroll">
+            {events.length === 0 ? (
+              <div
+                className="h-full flex items-center justify-center text-xs"
+                style={{ color: 'var(--text-dim)' }}
+              >
+                {wsStatus === 'connected'
+                  ? 'Waiting for events…'
+                  : 'Connecting to stream…'}
+              </div>
+            ) : (
+              events.map((ev, i) => (
+                <AlertCard key={`${ev.event_id}-${i}`} event={ev} />
+              ))
+            )}
+          </div>
         </div>
       </div>
-    </main>
+
+      {/* Charts */}
+      <div
+        className="flex-none grid grid-cols-3 border-t"
+        style={{ height: 210, borderColor: 'var(--border)' }}
+      >
+        <div
+          className="flex flex-col border-r"
+          style={{ borderColor: 'var(--border)' }}
+        >
+          <div
+            className="flex-none px-3 pt-2 pb-0.5 text-[10px] uppercase tracking-wider"
+            style={{ color: 'var(--text-muted)' }}
+          >
+            Events / Hour&nbsp;
+            <span style={{ color: 'var(--text-dim)' }}>— last 24 h</span>
+          </div>
+          <div className="flex-1 min-h-0 pb-1 px-1">
+            {trends.length > 0 ? (
+              <TrendsChart trends={trends} />
+            ) : (
+              <EmptyChart label="No trend data yet" />
+            )}
+          </div>
+        </div>
+
+        <div
+          className="flex flex-col border-r"
+          style={{ borderColor: 'var(--border)' }}
+        >
+          <div
+            className="flex-none px-3 pt-2 pb-0.5 text-[10px] uppercase tracking-wider"
+            style={{ color: 'var(--text-muted)' }}
+          >
+            Severity Profile&nbsp;
+            <span style={{ color: 'var(--text-dim)' }}>— live feed</span>
+          </div>
+          <div className="flex-1 min-h-0 pb-1">
+            {events.length > 0 ? (
+              <SeverityChart events={events} />
+            ) : (
+              <EmptyChart label="No events yet" />
+            )}
+          </div>
+        </div>
+
+        <div className="flex flex-col">
+          <div
+            className="flex-none px-3 pt-2 pb-0.5 text-[10px] uppercase tracking-wider"
+            style={{ color: 'var(--text-muted)' }}
+          >
+            Top Districts&nbsp;
+            <span style={{ color: 'var(--text-dim)' }}>— all time</span>
+          </div>
+          <div className="flex-1 min-h-0 pb-1">
+            {districts.length > 0 ? (
+              <DistrictChart districts={districts} />
+            ) : (
+              <EmptyChart label="No district data yet" />
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
