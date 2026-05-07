@@ -9,9 +9,16 @@ pkgs.mkShell {
     # ============================================================================
     # Rust Development (Ingestion Layer)
     # ============================================================================
-    rustup
+    rustc
+    cargo
+    rustfmt
+    clippy
     rust-analyzer
     cargo-edit
+    # rdkafka cmake-build feature dependencies
+    cmake
+    openssl
+    openssl.dev
 
     # ============================================================================
     # Go Development (API/WebSocket Layer)
@@ -107,6 +114,9 @@ pkgs.mkShell {
     export CARGO_HOME="$HOME/.cargo"
     export RUSTFLAGS="-C target-cpu=native"
     export PATH="$CARGO_HOME/bin:$PATH"
+    export PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig:$PKG_CONFIG_PATH"
+    export OPENSSL_DIR="${pkgs.openssl.dev}"
+    export OPENSSL_LIB_DIR="${pkgs.openssl.out}/lib"
 
     # Scala Configuration
     export SCALA_HOME="${pkgs.scala}"
@@ -157,7 +167,7 @@ pkgs.mkShell {
       echo "    ✓ Scala:         $(safe_version ${pkgs.scala}/bin/scala '-version')"
       echo "    ✓ Go:            $(safe_version ${pkgs.go}/bin/go 'version')"
       echo "    ✓ Java:          $(safe_version ${pkgs.openjdk25}/bin/java '-version')"
-      echo "    ✓ Rust:          $(safe_version rustc '--version' 2>&1 | grep -v 'rustup could not' || echo 'Run: rustup default stable')"
+      echo "    ✓ Rust:          $(safe_version rustc '--version')"
       echo ""
       
       echo "  🔄 Batch & Stream Processing (Scala + Spark):"
@@ -191,7 +201,7 @@ pkgs.mkShell {
       echo "  🎨 Code Formatters:"
       echo "    ✓ scalafmt:      $(safe_version scalafmt '--version')"
       echo "    ✓ gofmt:         $(if ${pkgs.go}/bin/go version &> /dev/null; then echo 'available'; else echo 'not available'; fi)"
-      echo "    ✓ rustfmt:       $(safe_version rustfmt '--version' 2>&1 | grep -v 'rustup could not' || echo 'Run: rustup default stable')"
+      echo "    ✓ rustfmt:       $(safe_version rustfmt '--version')"
       echo "    ✓ Prettier:      $(safe_version prettier '--version')"
       echo "    ✓ shfmt:         $(safe_version shfmt '--version')"
       echo "    ✓ nixfmt:        $(safe_version nixfmt '--version')"
@@ -200,7 +210,7 @@ pkgs.mkShell {
       
       echo "  🔍 Linters & Type Checkers:"
       echo "    ✓ golangci-lint: $(safe_version golangci-lint '--version')"
-      echo "    ✓ Clippy:        $(safe_version cargo 'clippy --version' 2>&1 | grep -v 'rustup could not' || echo 'Run: rustup default stable')"
+      echo "    ✓ Clippy:        $(safe_version clippy-driver '--version')"
       echo "    ✓ ESLint:        $(safe_version eslint '--version')"
       echo "    ✓ statix:        $(safe_version statix '--version')"
       echo "    ✓ shellcheck:    $(safe_version shellcheck '--version')"
