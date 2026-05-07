@@ -14,13 +14,16 @@
     "react": "^19.0.0-rc.1",
     "react-dom": "^19.0.0-rc.1"
   },
+  "overrides": {
+    "@next/swc-linux-x64-musl": "npm:@next/swc-linux-x64-gnu"
+  },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.4",
     "@types/node": "^20.10.6",
     "@types/react": "^19.0.0-rc.1",
     "@types/react-dom": "^19.0.0-rc.1",
     "autoprefixer": "^10.4.17",
-    "eslint": "^10.2.0",
+    "eslint": "^10.3.0",
     "eslint-config-next": "^15.1.3",
     "postcss": "^8.4.32",
     "tailwindcss": "^4.0.0-alpha.15",

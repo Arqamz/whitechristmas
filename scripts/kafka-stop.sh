@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Stop Kafka & ZooKeeper
+# Stop Kafka (KRaft mode — no ZooKeeper)
 # Run this: nix develop -c bash scripts/kafka-stop.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,19 +13,9 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-echo -e "${RED}🛑 Stopping Kafka Infrastructure${NC}"
+echo -e "${RED}Stopping Kafka${NC}"
 
-# Kill Kafka broker
-pkill -f "kafka.Kafka" || true
-sleep 1
-
-# Stop ZooKeeper (try zkServer.sh stop first)
-if command -v zkServer.sh &> /dev/null; then
-    zkServer.sh stop || true
-else
-    pkill -f "zookeeper" || true
-fi
-
+pkill -f "kafka.Kafka" 2>/dev/null || true
 sleep 1
 
 echo -e "${GREEN}✅ Kafka infrastructure stopped${NC}"

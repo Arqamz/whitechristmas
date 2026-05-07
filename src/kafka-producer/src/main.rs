@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
-use apache_avro::{Schema, types::Value as AvroValue, to_avro_datum};
+use apache_avro::{to_avro_datum, types::Value as AvroValue, Schema};
 use clap::Parser;
-use rdkafka::client::ClientConfig;
-use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::config::ClientConfig;
+use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -114,8 +114,7 @@ async fn register_schema(registry_url: &str, topic: &str, schema_json: &str) -> 
 /// Serialize an Avro record and prepend the Confluent wire format header:
 /// [magic byte 0x00] [schema_id: 4 bytes big-endian] [avro binary]
 fn confluent_encode(schema: &Schema, record: AvroValue, schema_id: u32) -> Result<Vec<u8>> {
-    let avro_bytes = to_avro_datum(schema, record)
-        .context("Failed to serialize Avro record")?;
+    let avro_bytes = to_avro_datum(schema, record).context("Failed to serialize Avro record")?;
 
     let mut payload = Vec::with_capacity(5 + avro_bytes.len());
     payload.push(0x00); // Confluent magic byte
@@ -169,17 +168,19 @@ async fn main() -> Result<()> {
     // Load Avro schema from the schemas directory relative to this binary's crate root
     let schema_path = std::env::current_dir()
         .unwrap_or_default()
-        .join("../../schemas/crime-event.avsc");
+        .join("../schemas/crime-event.avsc");
 
     let schema_json = std::fs::read_to_string(&schema_path)
         .with_context(|| format!("Cannot read schema file: {}", schema_path.display()))?;
 
-    let schema = Schema::parse_str(&schema_json)
-        .context("Failed to parse Avro schema")?;
+    let schema = Schema::parse_str(&schema_json).context("Failed to parse Avro schema")?;
     info!("✓ Avro schema loaded");
 
     // Register schema with Schema Registry
-    info!("Registering schema with Schema Registry at {}...", args.schema_registry);
+    info!(
+        "Registering schema with Schema Registry at {}...",
+        args.schema_registry
+    );
     let schema_id = register_schema(&args.schema_registry, &args.topic, &schema_json)
         .await
         .context("Schema registration failed")?;
@@ -227,9 +228,15 @@ async fn main() -> Result<()> {
         let avro_record = AvroValue::Record(vec![
             ("event_id".into(), AvroValue::String(event_id.clone())),
             ("victim_id".into(), opt_string(record.victim_name)),
-            ("incident_date".into(), AvroValue::String(
-                record.date.filter(|s| !s.is_empty()).unwrap_or_else(|| "unknown".into()),
-            )),
+            (
+                "incident_date".into(),
+                AvroValue::String(
+                    record
+                        .date
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "unknown".into()),
+                ),
+            ),
             ("incident_time".into(), opt_string(record.time)),
             ("location".into(), opt_string(record.location)),
             ("district".into(), opt_string(record.district)),
@@ -254,7 +261,12 @@ async fn main() -> Result<()> {
             Ok(_) => {
                 published += 1;
                 if published <= 10 || published % 100 == 0 {
-                    info!("📨 Published #{}: {} (severity={})", published, &event_id[..8], severity);
+                    info!(
+                        "📨 Published #{}: {} (severity={})",
+                        published,
+                        &event_id[..8],
+                        severity
+                    );
                 }
             }
             Err((e, _)) => warn!("Kafka send failed: {}", e),
@@ -264,7 +276,10 @@ async fn main() -> Result<()> {
     }
 
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    info!("✅ Done! Read: {} rows, Published: {} events", event_count, published);
+    info!(
+        "✅ Done! Read: {} rows, Published: {} events",
+        event_count, published
+    );
 
     producer.flush(Duration::from_secs(10));
     Ok(())

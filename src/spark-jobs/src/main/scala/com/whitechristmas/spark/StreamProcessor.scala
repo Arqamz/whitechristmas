@@ -40,7 +40,7 @@ object StreamProcessor {
     // Schema path relative to sbt working directory (src/spark-jobs/)
     val schemaPath = sys.env.getOrElse(
       "AVRO_SCHEMA_PATH",
-      "../../schemas/crime-event.avsc"
+      "../schemas/crime-event.avsc"
     )
 
     println(s"📊 Kafka Brokers: $kafkaBrokers")
@@ -100,7 +100,7 @@ object StreamProcessor {
         .withColumn("processed_at", current_timestamp())
         .withColumn("received_lag_ms",
           (col("processed_at").cast("long") - col("kafka_timestamp").cast("long")) * 1000)
-        .withColumn("is_alert", col("severity") >= 3)
+        .withColumn("is_alert", col("severity") >= 1)
 
       println("\n📋 Enriched schema:")
       enriched.printSchema()

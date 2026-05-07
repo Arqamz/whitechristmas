@@ -212,6 +212,20 @@ func KafkaConsumer(hub *EventHub, kafkaBrokers, topic string) {
 	}
 }
 
+// corsMiddleware adds CORS headers so the Next.js dev server on :3000 can reach the API on :8081.
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // StatsHandler returns server statistics
 func StatsHandler(hub *EventHub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -273,6 +287,7 @@ func main() {
 
 	// Setup router
 	r := chi.NewRouter()
+	r.Use(corsMiddleware)
 
 	// Routes
 	r.Get("/health", HealthHandler())
