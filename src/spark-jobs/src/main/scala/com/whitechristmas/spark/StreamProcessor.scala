@@ -2,7 +2,7 @@ package com.whitechristmas.spark
 
 import org.apache.spark.sql._
 import org.apache.spark.sql.avro.functions.from_avro
-import org.apache.spark.sql.functions._
+import org.apache.spark.sql.functions.{avg, col, count, current_timestamp, lit, max, round, stddev, struct, sum, to_json, unix_millis, when, window}
 import org.apache.spark.sql.types._
 import org.bson.Document
 import com.mongodb.client.MongoClients
@@ -253,9 +253,96 @@ object StreamProcessor {
         .option("checkpointLocation", s"$checkpointDir/metrics")
         .start()
 
+      // ── Anomaly detection: rolling z-score per district (2-minute window) ───
+      // Strategy: for each 2-minute tumbling window, compute mean and stddev of
+      // severity per district. Flag events as anomalous when their severity
+      // deviates more than 2 standard deviations from the window mean.
+      println("🔬 Starting z-score anomaly detection stream...")
+
+      // Compute per-district severity statistics over a 2-minute sliding window
+      val windowedStats = enriched
+        .withWatermark("processed_at", "30 seconds")
+        .groupBy(
+          window(col("processed_at"), "2 minutes", "30 seconds"),
+          col("district")
+        )
+        .agg(
+          count("event_id").as("window_count"),
+          avg("severity").as("mean_severity"),
+          stddev("severity").as("stddev_severity"),
+          max("severity").as("max_severity")
+        )
+
+      // Join back to enriched stream to compute per-event z-score
+      val anomalyQuery = windowedStats
+        .writeStream
+        .outputMode("update")
+        .foreachBatch { (batchDF: DataFrame, batchId: Long) =>
+          if (!batchDF.isEmpty) {
+            // Flag districts where max_severity exceeds mean + 2*stddev (z-score > 2)
+            val anomalies = batchDF
+              .withColumn(
+                "z_score",
+                when(
+                  col("stddev_severity").isNotNull && col("stddev_severity") > 0,
+                  (col("max_severity") - col("mean_severity")) / col("stddev_severity")
+                ).otherwise(lit(0.0))
+              )
+              .filter(col("z_score") > 2.0 || (col("stddev_severity").isNull && col("max_severity") >= 4))
+
+            if (!anomalies.isEmpty) {
+              println(s"\n[Anomaly Batch $batchId] 🚨 Statistical anomalies detected:")
+              anomalies.select(
+                col("district"),
+                col("window.start").as("window_start"),
+                col("window_count"),
+                round(col("mean_severity"), 2).as("mean_sev"),
+                round(col("stddev_severity"), 2).as("stddev_sev"),
+                col("max_severity"),
+                round(col("z_score"), 2).as("z_score")
+              ).show(10, truncate = false)
+
+              // Forward anomaly alerts to Kafka as a separate signal
+              if (kafkaBrokers.nonEmpty) {
+                try {
+                  anomalies
+                    .select(
+                      col("district").as("key"),
+                      to_json(struct(
+                        lit("anomaly").as("alert_type"),
+                        col("district"),
+                        col("window.start").as("window_start"),
+                        col("window_count"),
+                        round(col("mean_severity"), 2).as("mean_severity"),
+                        round(col("stddev_severity"), 2).as("stddev_severity"),
+                        col("max_severity"),
+                        round(col("z_score"), 2).as("z_score"),
+                        lit(System.currentTimeMillis()).as("detected_at")
+                      )).as("value")
+                    )
+                    .write
+                    .format("kafka")
+                    .option("kafka.bootstrap.servers", kafkaBrokers)
+                    .option("topic", alertsTopic)
+                    .save()
+                  println(s"  ✓ Anomaly alerts forwarded to Kafka topic: $alertsTopic")
+                } catch {
+                  case e: Exception =>
+                    println(s"  ✗ Anomaly Kafka write failed: ${e.getMessage}")
+                }
+              }
+            }
+          }
+        }
+        .option("checkpointLocation", s"$checkpointDir/anomaly")
+        .start()
+
       println()
       println("═══════════════════════════════════════════════════")
       println("✅ All streams started — awaiting events...")
+      println("   Main stream:    foreachBatch → PG + Mongo + Kafka alerts")
+      println("   Metrics stream: windowed district stats → console")
+      println("   Anomaly stream: z-score detection → Kafka alerts")
       println("   Press Ctrl+C to stop")
       println("═══════════════════════════════════════════════════")
 

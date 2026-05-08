@@ -17,8 +17,10 @@ Rust Producer → Avro → Schema Registry → Kafka (raw-events)
 | Kafka Broker     | 9092 | PLAINTEXT                                     |
 | Kafka Controller | 9093 | KRaft internal (no ZooKeeper)                 |
 | Schema Registry  | 8082 | confluent-platform (avoids conflict with API) |
-| Go API           | 8081 | WebSocket + HTTP                              |
+| Go API           | 8081 | WebSocket + HTTP + `/metrics`                 |
 | Next.js          | 3000 | Dev server                                    |
+| Prometheus       | 9090 | Scrapes Go API `/metrics` every 5 s           |
+| Grafana          | 3001 | Pre-provisioned pipeline dashboard            |
 
 > **Port conflict note:** The Schema Registry default is 8081, same as the Go API.
 > `scripts/schema-registry-start.sh` configures it to listen on **8082**.
@@ -362,6 +364,39 @@ Watch **http://localhost:3000** update live:
 
 ---
 
+## Observability (Prometheus + Grafana)
+
+Start after the Go API is running:
+
+```bash
+# Terminal 7 — Prometheus (scrapes :8081/metrics every 5 s)
+nix develop -c bash scripts/prometheus-start.sh
+# UI: http://localhost:9090
+
+# Terminal 8 — Grafana (pre-loaded WhiteChristmas dashboard)
+nix develop -c bash scripts/grafana-start.sh
+# UI: http://localhost:3001  (anonymous admin, no login)
+```
+
+**Pre-built dashboard** includes:
+
+- Events total counter (by severity label)
+- Active WebSocket clients gauge
+- Kafka messages consumed rate
+- HTTP request latency (p99 per route)
+- Broadcast errors counter
+
+---
+
+## Time Slider (Historical Replay)
+
+The dashboard footer has a **Time Replay** scrubber. Drag it left to load historical
+events from PostgreSQL instead of the live WebSocket stream. A "PAUSED / Historical Replay"
+badge appears in the feed header. Click **↩ Live** or drag the slider all the way right
+to resume the real-time feed.
+
+---
+
 ## Teardown
 
 ```bash
@@ -369,6 +404,12 @@ Watch **http://localhost:3000** update live:
 # Stop Spark   — Ctrl+C in Terminal 5
 # Stop Go API  — Ctrl+C in Terminal 3
 # Stop Next.js — Ctrl+C in Terminal 4
+
+# Stop Grafana
+nix develop -c bash scripts/grafana-stop.sh
+
+# Stop Prometheus
+nix develop -c bash scripts/prometheus-stop.sh
 
 # Stop Schema Registry
 nix develop -c bash scripts/schema-registry-stop.sh

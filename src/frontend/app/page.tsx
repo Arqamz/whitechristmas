@@ -405,10 +405,84 @@ function EmptyChart({ label }: { label: string }) {
   );
 }
 
+// ── Time slider (historical replay) ───────────────────────────────────────
+
+function TimeSlider({
+  onReplay,
+  onLive,
+  isReplay,
+}: {
+  onReplay: (offset: number, limit: number) => void;
+  onLive: () => void;
+  isReplay: boolean;
+}) {
+  const [sliderValue, setSliderValue] = useState(0); // 0 = oldest, 100 = live
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const v = Number(e.target.value);
+    setSliderValue(v);
+    // Map 0-99 → offset from newest: slider at 0 shows events from oldest, 100 = live
+    const offset = Math.round((100 - v) * 4.9); // up to ~490 offset
+    onReplay(offset, 50);
+  };
+
+  return (
+    <div
+      className="flex-none px-5 py-2 flex items-center gap-4 border-t"
+      style={{ borderColor: 'var(--border)', background: 'var(--bg-card)' }}
+    >
+      <span
+        className="text-[10px] uppercase tracking-widest flex-none"
+        style={{ color: 'var(--text-muted)' }}
+      >
+        Time Replay
+      </span>
+
+      <input
+        type="range"
+        min={0}
+        max={100}
+        value={sliderValue}
+        onChange={handleChange}
+        disabled={!isReplay && sliderValue === 100}
+        className="flex-1"
+        style={{ accentColor: 'var(--cyan)', cursor: 'pointer' }}
+      />
+
+      <span
+        className="text-[10px] flex-none tabular-nums"
+        style={{ color: isReplay ? 'var(--yellow)' : 'var(--text-dim)' }}
+      >
+        {sliderValue === 100
+          ? 'LIVE'
+          : `T-${Math.round((100 - sliderValue) * 4.9)} events`}
+      </span>
+
+      <button
+        onClick={() => {
+          setSliderValue(100);
+          onLive();
+        }}
+        className="text-[10px] px-2 py-0.5 rounded border uppercase tracking-wider"
+        style={{
+          color: isReplay ? 'var(--cyan)' : 'var(--text-dim)',
+          borderColor: isReplay ? 'var(--cyan)' : 'var(--border)',
+          background: isReplay ? 'var(--cyan-dim)' : 'transparent',
+          cursor: 'pointer',
+        }}
+      >
+        ↩ Live
+      </button>
+    </div>
+  );
+}
+
 // ── Main page ──────────────────────────────────────────────────────────────
 
 export default function Home() {
   const [events, setEvents] = useState<CrimeEvent[]>([]);
+  const [replayEvents, setReplayEvents] = useState<CrimeEvent[]>([]);
+  const [isReplay, setIsReplay] = useState(false);
   const [stats, setStats] = useState<Stats>({
     connected_clients: 0,
     total_events: 0,
@@ -422,6 +496,25 @@ export default function Home() {
   const [clock, setClock] = useState('');
 
   const tsBuffer = useRef<number[]>([]);
+
+  // Historical replay handlers
+  const handleReplay = useCallback(async (offset: number, limit: number) => {
+    try {
+      const r = await fetch(
+        `${API}/events/history?limit=${limit}&offset=${offset}`
+      );
+      if (r.ok) {
+        const data = await r.json();
+        setReplayEvents(data.events ?? []);
+        setIsReplay(true);
+      }
+    } catch {}
+  }, []);
+
+  const handleLive = useCallback(() => {
+    setIsReplay(false);
+    setReplayEvents([]);
+  }, []);
 
   // Clock
   useEffect(() => {
@@ -524,6 +617,8 @@ export default function Home() {
   ).size;
 
   const criticalCount = events.filter((e) => (e.severity ?? 0) >= 4).length;
+
+  const displayEvents = isReplay ? replayEvents : events;
 
   const statusColor =
     wsStatus === 'connected'
@@ -659,36 +754,61 @@ export default function Home() {
               background: 'var(--bg-card)',
             }}
           >
-            <span
-              className="text-[10px] uppercase tracking-wider"
-              style={{ color: 'var(--text-muted)' }}
-            >
-              Live Alert Feed
-            </span>
+            <div className="flex items-center gap-2">
+              <span
+                className="text-[10px] uppercase tracking-wider"
+                style={{
+                  color: isReplay ? 'var(--yellow)' : 'var(--text-muted)',
+                }}
+              >
+                {isReplay ? '⏮ Historical Replay' : 'Live Alert Feed'}
+              </span>
+              {isReplay && (
+                <span
+                  className="text-[9px] px-1 py-0.5 rounded border"
+                  style={{
+                    color: 'var(--yellow)',
+                    borderColor: 'rgba(255,217,61,0.3)',
+                    background: 'rgba(255,217,61,0.08)',
+                  }}
+                >
+                  PAUSED
+                </span>
+              )}
+            </div>
             <span className="text-[10px]" style={{ color: 'var(--text-dim)' }}>
-              {events.length > 0
-                ? `${events.length} in buffer`
+              {displayEvents.length > 0
+                ? `${displayEvents.length} events`
                 : 'waiting for events…'}
             </span>
           </div>
           <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1.5 custom-scroll">
-            {events.length === 0 ? (
+            {displayEvents.length === 0 ? (
               <div
                 className="h-full flex items-center justify-center text-xs"
                 style={{ color: 'var(--text-dim)' }}
               >
-                {wsStatus === 'connected'
-                  ? 'Waiting for events…'
-                  : 'Connecting to stream…'}
+                {isReplay
+                  ? 'No events in this time window'
+                  : wsStatus === 'connected'
+                    ? 'Waiting for events…'
+                    : 'Connecting to stream…'}
               </div>
             ) : (
-              events.map((ev, i) => (
+              displayEvents.map((ev, i) => (
                 <AlertCard key={`${ev.event_id}-${i}`} event={ev} />
               ))
             )}
           </div>
         </div>
       </div>
+
+      {/* Time Slider */}
+      <TimeSlider
+        onReplay={handleReplay}
+        onLive={handleLive}
+        isReplay={isReplay}
+      />
 
       {/* Charts */}
       <div

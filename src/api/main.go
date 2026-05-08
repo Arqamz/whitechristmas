@@ -18,10 +18,43 @@ import (
 	"github.com/gorilla/websocket"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/joho/godotenv"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	kafka "github.com/segmentio/kafka-go"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+)
+
+// ── Prometheus metrics ────────────────────────────────────────────────────────
+
+var (
+	metricEventsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "whitechristmas_events_total",
+		Help: "Total crime events received from Kafka.",
+	}, []string{"severity"})
+
+	metricWSClients = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "whitechristmas_websocket_clients",
+		Help: "Number of currently connected WebSocket clients.",
+	})
+
+	metricKafkaMessages = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "whitechristmas_kafka_messages_total",
+		Help: "Total Kafka messages consumed from the alerts topic.",
+	})
+
+	metricHTTPDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "whitechristmas_http_request_duration_seconds",
+		Help:    "HTTP request latency.",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"method", "route", "status"})
+
+	metricBroadcastErrors = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "whitechristmas_broadcast_errors_total",
+		Help: "Total errors while broadcasting to WebSocket clients.",
+	})
 )
 
 // CrimeEvent represents a crime alert forwarded from Spark via the alerts topic.
@@ -74,27 +107,25 @@ func (h *EventHub) Run() {
 			h.mu.Lock()
 			h.clients[client] = true
 			h.mu.Unlock()
+			metricWSClients.Inc()
 			log.Printf("WebSocket client connected. Total clients: %d", len(h.clients))
 
 		case client := <-h.unregister:
 			h.mu.Lock()
 			delete(h.clients, client)
 			h.mu.Unlock()
+			metricWSClients.Dec()
 			client.Close()
 			log.Printf("WebSocket client disconnected. Total clients: %d", len(h.clients))
 
 		case message := <-h.broadcast:
 			h.mu.RLock()
 			for client := range h.clients {
-				select {
-				case err := <-make(chan error, 1):
-					if err != nil {
-						h.mu.RUnlock()
-						h.unregister <- client
-						h.mu.RLock()
-					}
-				default:
-					client.WriteJSON(message)
+				if err := client.WriteJSON(message); err != nil {
+					metricBroadcastErrors.Inc()
+					h.mu.RUnlock()
+					h.unregister <- client
+					h.mu.RLock()
 				}
 			}
 			h.mu.RUnlock()
@@ -107,6 +138,12 @@ func (h *EventHub) BroadcastEvent(event *CrimeEvent) {
 	h.mu.Lock()
 	h.eventCount++
 	h.mu.Unlock()
+
+	sev := "unknown"
+	if event.Severity != nil {
+		sev = strconv.Itoa(*event.Severity)
+	}
+	metricEventsTotal.WithLabelValues(sev).Inc()
 
 	msg := &WebSocketMessage{
 		Type:      "event",
@@ -209,6 +246,7 @@ func KafkaConsumer(hub *EventHub, kafkaBrokers, topic string) {
 			continue
 		}
 
+		metricKafkaMessages.Inc()
 		hub.BroadcastEvent(&event)
 		reader.CommitMessages(context.Background(), msg)
 
@@ -217,6 +255,30 @@ func KafkaConsumer(hub *EventHub, kafkaBrokers, topic string) {
 			event.EventID,
 			event.Severity)
 	}
+}
+
+// instrumentMiddleware wraps handlers to record HTTP duration metrics.
+func instrumentMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rw := &statusWriter{ResponseWriter: w, status: 200}
+		next.ServeHTTP(rw, r)
+		metricHTTPDuration.WithLabelValues(
+			r.Method,
+			r.URL.Path,
+			strconv.Itoa(rw.status),
+		).Observe(time.Since(start).Seconds())
+	})
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sw *statusWriter) WriteHeader(code int) {
+	sw.status = code
+	sw.ResponseWriter.WriteHeader(code)
 }
 
 // corsMiddleware adds CORS headers so the Next.js dev server on :3000 can reach the API on :8081.
@@ -627,11 +689,13 @@ func main() {
 	// Setup router
 	r := chi.NewRouter()
 	r.Use(corsMiddleware)
+	r.Use(instrumentMiddleware)
 
 	// Routes
 	r.Get("/health", HealthHandler())
 	r.Get("/stats", StatsHandler(hub))
 	r.HandleFunc("/ws", WebSocketHandler(hub))
+	r.Handle("/metrics", promhttp.Handler())
 
 	// Historical / analytics REST endpoints (backed by PostgreSQL + MongoDB)
 	r.Get("/events/history", EventHistoryHandler())
@@ -658,6 +722,7 @@ func main() {
 		fmt.Printf("  Health:           http://localhost:%s/health\n", port)
 		fmt.Printf("  Stats:            http://localhost:%s/stats\n", port)
 		fmt.Printf("  WebSocket:        ws://localhost:%s/ws\n", port)
+		fmt.Printf("  Prometheus:       http://localhost:%s/metrics\n", port)
 		fmt.Printf("  Event history:    http://localhost:%s/events/history\n", port)
 		fmt.Printf("  District summary: http://localhost:%s/districts/summary\n", port)
 		fmt.Printf("  Hourly trends:    http://localhost:%s/analytics/trends\n", port)
