@@ -57,17 +57,24 @@ var (
 	})
 )
 
-// CrimeEvent represents a crime alert forwarded from Spark via the alerts topic.
-// Fields mirror the JSON written by StreamProcessor's alertsQuery.
+// CrimeEvent represents a unified crime alert forwarded from Spark via the alerts topic.
+// Fields cover all five Chicago public safety datasets.
 type CrimeEvent struct {
 	EventID               string  `json:"event_id"`
+	SourceDataset         *string `json:"source_dataset,omitempty"`
 	VictimID              *string `json:"victim_id"`
 	IncidentDate          string  `json:"incident_date"`
 	IncidentTime          *string `json:"incident_time"`
 	Location              *string `json:"location"`
 	District              *string `json:"district"`
+	Beat                  *string `json:"beat,omitempty"`
+	CrimeType             *string `json:"crime_type,omitempty"`
 	InjuryType            *string `json:"injury_type"`
+	EventLabel            *string `json:"event_label,omitempty"`
 	Severity              *int    `json:"severity"`
+	Latitude              *string `json:"latitude,omitempty"`
+	Longitude             *string `json:"longitude,omitempty"`
+	IsArrest              *bool   `json:"is_arrest,omitempty"`
 	ProcessedTimestamp    int64   `json:"processed_timestamp"`
 	ProcessedTimestampAPI int64   `json:"processed_timestamp_api,omitempty"`
 }
@@ -349,26 +356,35 @@ func initPostgres(connStr string) error {
 	}
 
 	// Create the events table matching Spark's JDBC auto-schema.
-	// Column types mirror Spark's DataFrame → JDBC mappings for PostgreSQL.
+	// Covers all five Chicago public safety datasets via the unified Avro schema.
 	const ddl = `
 CREATE TABLE IF NOT EXISTS events (
-    kafka_timestamp   TIMESTAMP,
-    event_id          TEXT,
-    victim_id         TEXT,
-    incident_date     TEXT,
-    incident_time     TEXT,
-    location          TEXT,
-    district          TEXT,
-    injury_type       TEXT,
-    severity          INTEGER,
+    kafka_timestamp     TIMESTAMP,
+    event_id            TEXT,
+    source_dataset      TEXT,
+    victim_id           TEXT,
+    incident_date       TEXT,
+    incident_time       TEXT,
+    location            TEXT,
+    district            TEXT,
+    beat                TEXT,
+    crime_type          TEXT,
+    injury_type         TEXT,
+    event_label         TEXT,
+    severity            INTEGER,
+    latitude            TEXT,
+    longitude           TEXT,
+    is_arrest           BOOLEAN,
     processed_timestamp BIGINT,
-    processed_at      TIMESTAMP,
-    received_lag_ms   BIGINT,
-    is_alert          BOOLEAN
+    processed_at        TIMESTAMP,
+    received_lag_ms     BIGINT,
+    is_alert            BOOLEAN
 );
-CREATE INDEX IF NOT EXISTS idx_events_processed_at ON events (processed_at DESC);
-CREATE INDEX IF NOT EXISTS idx_events_severity     ON events (severity);
-CREATE INDEX IF NOT EXISTS idx_events_district     ON events (district);`
+CREATE INDEX IF NOT EXISTS idx_events_processed_at   ON events (processed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_events_severity       ON events (severity);
+CREATE INDEX IF NOT EXISTS idx_events_district       ON events (district);
+CREATE INDEX IF NOT EXISTS idx_events_source_dataset ON events (source_dataset);
+CREATE INDEX IF NOT EXISTS idx_events_crime_type     ON events (crime_type);`
 
 	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		db.Close()
@@ -401,18 +417,26 @@ func initMongo(connStr string) error {
 
 // ─── REST handlers ────────────────────────────────────────────────────────────
 
-// EventHistoryHandler serves GET /events/history?limit=50&offset=0
+// EventHistoryHandler serves GET /events/history?limit=50&offset=0&dataset=crimes
 // Returns paginated events from PostgreSQL ordered newest-first.
+// Optional ?dataset= filter narrows by source_dataset.
 func EventHistoryHandler() http.HandlerFunc {
 	type row struct {
 		EventID            string  `json:"event_id"`
+		SourceDataset      *string `json:"source_dataset"`
 		VictimID           *string `json:"victim_id"`
 		IncidentDate       string  `json:"incident_date"`
 		IncidentTime       *string `json:"incident_time"`
 		Location           *string `json:"location"`
 		District           *string `json:"district"`
+		Beat               *string `json:"beat"`
+		CrimeType          *string `json:"crime_type"`
 		InjuryType         *string `json:"injury_type"`
+		EventLabel         *string `json:"event_label"`
 		Severity           *int    `json:"severity"`
+		Latitude           *string `json:"latitude"`
+		Longitude          *string `json:"longitude"`
+		IsArrest           *bool   `json:"is_arrest"`
 		ProcessedTimestamp int64   `json:"processed_timestamp"`
 		ProcessedAt        string  `json:"processed_at"`
 		IsAlert            bool    `json:"is_alert"`
@@ -427,31 +451,50 @@ func EventHistoryHandler() http.HandlerFunc {
 		if limit <= 0 || limit > 500 {
 			limit = 50
 		}
+		dataset := r.URL.Query().Get("dataset")
 
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
-		rows, err := pgDB.QueryContext(ctx, `
-			SELECT event_id, victim_id, incident_date, incident_time, location,
-			       district, injury_type, severity, processed_timestamp,
-			       processed_at, is_alert
-			FROM events
-			ORDER BY processed_at DESC
-			LIMIT $1 OFFSET $2`, limit, offset)
+		var queryRows *sql.Rows
+		var err error
+		if dataset != "" {
+			queryRows, err = pgDB.QueryContext(ctx, `
+				SELECT event_id, source_dataset, victim_id, incident_date, incident_time,
+				       location, district, beat, crime_type, injury_type, event_label,
+				       severity, latitude, longitude, is_arrest, processed_timestamp,
+				       processed_at, is_alert
+				FROM events
+				WHERE source_dataset = $1
+				ORDER BY processed_at DESC
+				LIMIT $2 OFFSET $3`, dataset, limit, offset)
+		} else {
+			queryRows, err = pgDB.QueryContext(ctx, `
+				SELECT event_id, source_dataset, victim_id, incident_date, incident_time,
+				       location, district, beat, crime_type, injury_type, event_label,
+				       severity, latitude, longitude, is_arrest, processed_timestamp,
+				       processed_at, is_alert
+				FROM events
+				ORDER BY processed_at DESC
+				LIMIT $1 OFFSET $2`, limit, offset)
+		}
 		if err != nil {
 			log.Printf("events/history query: %v", err)
 			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
 			return
 		}
-		defer rows.Close()
+		defer queryRows.Close()
 
 		var events []row
-		for rows.Next() {
+		for queryRows.Next() {
 			var e row
 			var processedAt time.Time
-			if err := rows.Scan(&e.EventID, &e.VictimID, &e.IncidentDate, &e.IncidentTime,
-				&e.Location, &e.District, &e.InjuryType, &e.Severity,
-				&e.ProcessedTimestamp, &processedAt, &e.IsAlert); err != nil {
+			if err := queryRows.Scan(
+				&e.EventID, &e.SourceDataset, &e.VictimID, &e.IncidentDate, &e.IncidentTime,
+				&e.Location, &e.District, &e.Beat, &e.CrimeType, &e.InjuryType, &e.EventLabel,
+				&e.Severity, &e.Latitude, &e.Longitude, &e.IsArrest,
+				&e.ProcessedTimestamp, &processedAt, &e.IsAlert,
+			); err != nil {
 				continue
 			}
 			e.ProcessedAt = processedAt.Format(time.RFC3339)

@@ -2,76 +2,93 @@
   "type": "record",
   "name": "CrimeEvent",
   "namespace": "com.whitechristmas.events",
-  "doc": "Crime event record for real-time analytics",
+  "doc": "Unified crime event — normalised across all five Chicago public safety datasets",
   "fields": [
     {
       "name": "event_id",
       "type": "string",
-      "doc": "Unique event identifier (UUID)"
+      "doc": "UUID assigned by the producer"
+    },
+    {
+      "name": "source_dataset",
+      "type": "string",
+      "doc": "Origin dataset: violence_reduction | crimes | arrests | sex_offenders"
     },
     {
       "name": "victim_id",
-      "type": [
-        "null",
-        "string"
-      ],
+      "type": ["null", "string"],
       "default": null,
-      "doc": "Victim identifier"
+      "doc": "Victim or case identifier from the source record"
     },
     {
       "name": "incident_date",
       "type": "string",
-      "doc": "Incident date in ISO 8601 format"
+      "doc": "Incident or arrest date string as-is from the CSV"
     },
     {
       "name": "incident_time",
-      "type": [
-        "null",
-        "string"
-      ],
+      "type": ["null", "string"],
       "default": null,
-      "doc": "Incident time HH:MM:SS format"
+      "doc": "Time portion extracted from the source timestamp"
     },
     {
       "name": "location",
-      "type": [
-        "null",
-        "string"
-      ],
+      "type": ["null", "string"],
       "default": null,
-      "doc": "Geographic location/address"
+      "doc": "Block address or location description"
     },
     {
       "name": "district",
-      "type": [
-        "null",
-        "string"
-      ],
+      "type": ["null", "string"],
       "default": null,
-      "doc": "Police district"
+      "doc": "CPD district number"
+    },
+    {
+      "name": "beat",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "CPD beat number"
+    },
+    {
+      "name": "crime_type",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "Normalised crime category (Primary Type / Charge / Victimisation type)"
     },
     {
       "name": "injury_type",
-      "type": [
-        "null",
-        "string"
-      ],
+      "type": ["null", "string"],
       "default": null,
-      "doc": "Type of injury (e.g., Homicide, Non-Fatal Shooting)"
+      "doc": "Body part or injury detail (Violence Reduction dataset only)"
     },
     {
       "name": "severity",
-      "type": [
-        "null",
-        "int"
-      ],
+      "type": ["null", "int"],
       "default": null,
-      "doc": "Severity level 1-5 (5 = most severe)"
+      "doc": "Computed severity 1–5 (5 = most severe)"
+    },
+    {
+      "name": "latitude",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "WGS-84 latitude string"
+    },
+    {
+      "name": "longitude",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "WGS-84 longitude string"
+    },
+    {
+      "name": "is_arrest",
+      "type": ["null", "boolean"],
+      "default": null,
+      "doc": "Whether this event resulted in an arrest (Crimes dataset)"
     },
     {
       "name": "processed_timestamp",
       "type": "long",
-      "doc": "Server processing timestamp (epoch milliseconds)"
+      "doc": "Producer wall-clock timestamp (epoch ms)"
     }
   ]
 }

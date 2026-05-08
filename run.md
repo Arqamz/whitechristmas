@@ -206,37 +206,64 @@ Spark blocks here, streaming continuously. Logs appear as events arrive.
 
 ---
 
-## Step 6 — Run the Rust Producer (Single Event)
+## Step 6 — Run the Rust Producer
 
-Open **Terminal 6**. This injects the single point transform.
+Open **Terminal 6**. The producer supports all five Chicago datasets.
 
 ```bash
 cd /home/arqam/WhiteChristmas/src/kafka-producer
 
 # Build (first time or after code changes)
 cargo build --release
+```
 
-# Produce exactly 1 event, verbose
+### Option A — All datasets, 500 events each (recommended for demo)
+
+```bash
+./target/release/producer \
+  --csv-dir ../../data \
+  --kafka-brokers localhost:9092 \
+  --topic raw-events \
+  --schema-registry http://localhost:8082 \
+  --events-per-sec 10 \
+  --max-per-dataset 500
+```
+
+Streams in order: Violence Reduction → Crimes → Arrests → Sex Offenders  
+Police Stations is reference data and is skipped automatically.
+
+### Option B — Single dataset, unlimited
+
+```bash
+./target/release/producer \
+  --csv-path ../../data/Crimes_-_2001_to_Present_20260505.csv \
+  --kafka-brokers localhost:9092 \
+  --topic raw-events \
+  --schema-registry http://localhost:8082 \
+  --events-per-sec 10
+```
+
+### Option C — Quick single-event smoke test
+
+```bash
 ./target/release/producer \
   --csv-path ../../data/Violence_Reduction_-_Victims_of_Homicides_and_Non-Fatal_Shootings_20260505.csv \
   --kafka-brokers localhost:9092 \
   --topic raw-events \
   --schema-registry http://localhost:8082 \
   --events-per-sec 1 \
-  --max-events 1 \
+  --max-per-dataset 1 \
   --verbose
 ```
 
-Expected output:
+### Dataset → severity mapping
 
-```
-[INFO] Fetching/registering schema with Schema Registry at http://localhost:8082
-[INFO] Schema registered with ID: 1
-[INFO] Reading CSV: ...Violence_Reduction...csv
-[INFO] Publishing event_id=<uuid> date=... district=... severity=...
-[INFO] ✓ Delivered to raw-events [partition=0, offset=0]
-[INFO] Published 1/1 events. Exiting.
-```
+| Dataset            | Field used                             | 5              | 4                             | 3              | 2               | 1     |
+| ------------------ | -------------------------------------- | -------------- | ----------------------------- | -------------- | --------------- | ----- |
+| violence_reduction | GUNSHOT_INJURY + VICTIMIZATION_PRIMARY | homicide/fatal | gunshot                       | head/chest     | leg/arm         | other |
+| crimes             | Primary Type                           | HOMICIDE       | ASSAULT/BATTERY/ROBBERY/ARSON | THEFT/BURGLARY | FRAUD/NARCOTICS | other |
+| arrests            | CHARGE 1 CLASS                         | Class X        | Class 1–2                     | Class 3–4      | Misdemeanor A   | other |
+| sex_offenders      | VICTIM MINOR                           | MINOR=Y        | —                             | MINOR=N        | —               | —     |
 
 ---
 

@@ -118,17 +118,23 @@ object StreamProcessor {
         .select(
           col("kafka_timestamp"),
           col("event.event_id"),
+          col("event.source_dataset"),
           col("event.victim_id"),
           col("event.incident_date"),
           col("event.incident_time"),
           col("event.location"),
           col("event.district"),
+          col("event.beat"),
+          col("event.crime_type"),
           col("event.injury_type"),
           col("event.severity"),
+          col("event.latitude"),
+          col("event.longitude"),
+          col("event.is_arrest"),
           col("event.processed_timestamp")
         )
 
-      // Enrich with server-side timestamps and a high-severity flag
+      // Enrich with server-side timestamps, alert flag, and effective crime label
       val enriched = parsed
         .withColumn("processed_at", current_timestamp())
         .withColumn(
@@ -136,6 +142,12 @@ object StreamProcessor {
           (col("processed_at").cast("long") - col("kafka_timestamp").cast("long")) * 1000
         )
         .withColumn("is_alert", col("severity") >= 3)
+        // Unified label: prefer crime_type, fall back to injury_type
+        .withColumn(
+          "event_label",
+          when(col("crime_type").isNotNull && col("crime_type") =!= "", col("crime_type"))
+            .otherwise(col("injury_type"))
+        )
 
       // ── Main query: single foreachBatch fans out to all sinks ──────────────
       println("🚀 Starting main foreachBatch stream (PostgreSQL + MongoDB + Kafka)...")
@@ -203,13 +215,20 @@ object StreamProcessor {
                     col("event_id").as("key"),
                     to_json(struct(
                       col("event_id"),
+                      col("source_dataset"),
                       col("victim_id"),
                       col("incident_date"),
                       col("incident_time"),
                       col("location"),
                       col("district"),
+                      col("beat"),
+                      col("crime_type"),
                       col("injury_type"),
+                      col("event_label"),
                       col("severity"),
+                      col("latitude"),
+                      col("longitude"),
+                      col("is_arrest"),
                       col("processed_timestamp"),
                       unix_millis(col("processed_at")).as("processed_timestamp_api")
                     )).as("value")
