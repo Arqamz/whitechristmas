@@ -435,6 +435,24 @@ CREATE TABLE IF NOT EXISTS correlations (
     metric_b           DOUBLE PRECISION,
     sex_offender_count BIGINT
 );
+CREATE TABLE IF NOT EXISTS sex_offender_proximity (
+    offender_name   TEXT,
+    block           TEXT,
+    race            TEXT,
+    gender          TEXT,
+    victim_minor    TEXT,
+    is_victim_minor BOOLEAN,
+    priority_flag   TEXT
+);
+CREATE TABLE IF NOT EXISTS district_offender_density (
+    district                    TEXT,
+    district_name               TEXT,
+    station_address             TEXT,
+    station_lat                 DOUBLE PRECISION,
+    station_lon                 DOUBLE PRECISION,
+    total_registered_offenders  BIGINT,
+    minor_victim_offenders      BIGINT
+);
 CREATE TABLE IF NOT EXISTS alerts (
     source_dataset      TEXT,
     district            TEXT,
@@ -1075,6 +1093,69 @@ func ViolenceHandler() http.HandlerFunc {
 	}
 }
 
+// SexOffendersHandler serves GET /analytics/sex-offenders
+// Returns a priority/race breakdown from sex_offender_proximity.
+func SexOffendersHandler() http.HandlerFunc {
+	type raceRow struct {
+		Race  string `json:"race"`
+		Count int64  `json:"count"`
+	}
+	type response struct {
+		TotalOffenders   int64     `json:"total_offenders"`
+		MinorVictimCount int64     `json:"minor_victim_count"`
+		PriorityCount    int64     `json:"priority_count"`
+		StandardCount    int64     `json:"standard_count"`
+		ByRace           []raceRow `json:"by_race"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if pgDB == nil {
+			http.Error(w, `{"error":"PostgreSQL not connected"}`, http.StatusServiceUnavailable)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		var resp response
+		err := pgDB.QueryRowContext(ctx, `
+			SELECT
+			  COUNT(*) AS total_offenders,
+			  COUNT(*) FILTER (WHERE is_victim_minor = true) AS minor_victim_count,
+			  COUNT(*) FILTER (WHERE priority_flag = 'PRIORITY') AS priority_count,
+			  COUNT(*) FILTER (WHERE priority_flag = 'STANDARD') AS standard_count
+			FROM sex_offender_proximity`).
+			Scan(&resp.TotalOffenders, &resp.MinorVictimCount, &resp.PriorityCount, &resp.StandardCount)
+		if tableNotFound(err) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": response{}, "status": "batch job not yet run"})
+			return
+		}
+		if err != nil {
+			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
+			return
+		}
+
+		rows, err := pgDB.QueryContext(ctx, `
+			SELECT COALESCE(race,'UNKNOWN') AS race, COUNT(*) AS count
+			FROM sex_offender_proximity
+			WHERE race IS NOT NULL AND race <> ''
+			GROUP BY race ORDER BY count DESC LIMIT 10`)
+		if err == nil {
+			defer func() { _ = rows.Close() }()
+			for rows.Next() {
+				var rr raceRow
+				if err := rows.Scan(&rr.Race, &rr.Count); err == nil {
+					resp.ByRace = append(resp.ByRace, rr)
+				}
+			}
+		}
+		if resp.ByRace == nil {
+			resp.ByRace = []raceRow{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": resp})
+	}
+}
+
 // SeverityHandler serves GET /analytics/severity
 // Returns cumulative event counts grouped by severity level from the events table.
 func SeverityHandler() http.HandlerFunc {
@@ -1218,6 +1299,7 @@ func main() {
 	r.Get("/analytics/correlations", CorrelationsHandler())
 	r.Get("/analytics/arrest-rates", ArrestRatesHandler())
 	r.Get("/analytics/violence", ViolenceHandler())
+	r.Get("/analytics/sex-offenders", SexOffendersHandler())
 	r.Get("/analytics/severity", SeverityHandler())
 
 	// Create server
