@@ -1,5 +1,5 @@
 # ── Stage 1: Build fat JAR ────────────────────────────────────────────────────
-FROM eclipse-temurin:17-jdk-jammy AS builder
+FROM eclipse-temurin:21-jdk-jammy AS builder
 
 ARG SBT_VERSION=1.10.7
 RUN apt-get update && apt-get install -y --no-install-recommends curl && \
@@ -20,12 +20,15 @@ COPY src/spark-jobs/src ./src
 RUN sbt assembly
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
-# eclipse-temurin:17-jre gives us a lean JVM without build tooling
-FROM eclipse-temurin:17-jre-jammy
+# eclipse-temurin:21-jre gives us a lean JVM matching the dev environment (Java 21)
+FROM eclipse-temurin:21-jre-jammy
 
 WORKDIR /app
 
 COPY --from=builder /build/target/scala-2.13/whitechristmas-spark-assembly.jar /app/app.jar
+
+# log4j2 config — placed on disk so the JVM flag can reference it
+COPY src/spark-jobs/log4j2.properties /app/log4j2.properties
 
 # Avro schema read at runtime from this path (matches AVRO_SCHEMA_PATH env var)
 COPY src/schemas /schemas
