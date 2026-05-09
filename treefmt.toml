@@ -1,7 +1,10 @@
 # Unified formatter configuration for the entire workspace
-# This file is the single source of truth for code formatting and linting
+# This file is the single source of truth for code formatting
 # Run: treefmt (formats all supported files)
-# Run: treefmt --check (CI mode - check without changes)
+# Run: treefmt --ci (CI mode - fail if files would change)
+#
+# Note: linters that require module context (golangci-lint, cargo clippy, eslint)
+# are intentionally excluded — they run as dedicated lefthook pre-push commands.
 
 [build]
 on-unmatched = "warn"
@@ -21,26 +24,15 @@ excludes = ["target", ".git", "project"]
 command = "prettier"
 options = ["--write", "--print-width=80"]
 includes = ["*.js", "*.jsx", "*.ts", "*.tsx", "*.json", "*.md"]
-excludes = ["node_modules", ".next", "dist", "build", "package-lock.json", "yarn.lock"]
+excludes = ["node_modules", ".next", "dist", "build", "package-lock.json", "yarn.lock", "bun.lock"]
 
 # =============================================================================
-# JAVASCRIPT/TYPESCRIPT - ESLint for linting
-# =============================================================================
-[formatter.eslint]
-command = "eslint"
-options = ["--fix", "--max-warnings=0"]
-includes = ["*.js", "*.jsx", "*.ts", "*.tsx"]
-excludes = ["node_modules", ".next", "dist", "build", ".eslintignore"]
-
-# =============================================================================
-# NIX - nixfmt for formatting (statix is used separately for linting)
+# NIX - nixfmt for formatting
 # =============================================================================
 [formatter.nix]
 command = "nixfmt"
 includes = ["*.nix"]
 excludes = ["flake.lock"]
-
-# Note: statix is used as a separate linter, not as a formatter in treefmt
 
 # =============================================================================
 # SHELL - shfmt for shell script formatting
@@ -70,7 +62,7 @@ includes = ["*.yaml", "*.yml"]
 excludes = [".git", "node_modules", ".next"]
 
 # =============================================================================
-# GO - gofmt for code formatting
+# GO - gofmt for code formatting (golangci-lint runs in lefthook, needs module context)
 # =============================================================================
 [formatter.go-format]
 command = "gofmt"
@@ -79,16 +71,7 @@ includes = ["*.go"]
 excludes = ["vendor", ".git", "build"]
 
 # =============================================================================
-# GO - golangci-lint for linting
-# =============================================================================
-[formatter.go-lint]
-command = "golangci-lint"
-options = ["run", "--fix"]
-includes = ["*.go"]
-excludes = ["vendor", ".git", "build"]
-
-# =============================================================================
-# RUST - rustfmt for code formatting
+# RUST - rustfmt for code formatting (cargo clippy runs in lefthook, needs Cargo.toml context)
 # =============================================================================
 [formatter.rust-format]
 command = "rustfmt"
@@ -97,22 +80,13 @@ includes = ["*.rs"]
 excludes = ["target", ".git"]
 
 # =============================================================================
-# RUST - clippy for linting (runs via cargo)
-# =============================================================================
-[formatter.rust-clippy]
-command = "cargo"
-options = ["clippy", "--all", "--all-targets", "--all-features", "--fix", "--allow-dirty"]
-includes = ["*.rs"]
-excludes = ["target", ".git"]
-
-# =============================================================================
-# CI PROFILE - Strict checks without auto-formatting
+# CI PROFILE - Strict format checks (no linters that need module context)
 # =============================================================================
 [profile.ci]
-formatters = ["scala-format", "nix", "prettier", "eslint", "shell-format", "shell-lint", "yaml", "go-format", "go-lint", "rust-format"]
+formatters = ["scala-format", "nix", "prettier", "shell-format", "shell-lint", "yaml", "go-format", "rust-format"]
 
 # =============================================================================
-# DEFAULT PROFILE - Auto-formatting and fixing
+# DEFAULT PROFILE - Auto-formatting
 # =============================================================================
 [profile.default]
-formatters = ["scala-format", "prettier", "eslint", "shell-format", "shell-lint", "nix", "yaml", "go-format", "go-lint", "rust-format"]
+formatters = ["scala-format", "prettier", "shell-format", "shell-lint", "nix", "yaml", "go-format", "rust-format"]
