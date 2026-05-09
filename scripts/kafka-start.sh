@@ -105,7 +105,7 @@ export LOG_DIR # kafka-server-start.sh uses LOG_DIR for its own logs
 
 # Wait up to 15 s for the broker to become ready
 echo -n "   Waiting for Kafka"
-for i in $(seq 1 15); do
+for _ in $(seq 1 15); do
   if nc -z localhost 9092 2>/dev/null; then
     echo ""
     break

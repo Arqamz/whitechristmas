@@ -74,7 +74,7 @@ echo "$SR_PID" >"$PID_FILE"
 
 # Wait for the HTTP listener to come up (up to 20 s)
 echo -n "   Waiting for Schema Registry"
-for i in $(seq 1 20); do
+for _ in $(seq 1 20); do
   if curl -sf http://localhost:8082/subjects >/dev/null 2>&1; then
     echo ""
     break
