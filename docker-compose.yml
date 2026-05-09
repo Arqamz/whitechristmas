@@ -1,0 +1,286 @@
+services:
+
+  # ── Infrastructure ──────────────────────────────────────────────────────────
+
+  kafka:
+    image: confluentinc/cp-kafka:7.7.0
+    hostname: kafka
+    container_name: wc-kafka
+    ports:
+      - "9092:9092"     # internal (used by all containers)
+      - "29092:29092"   # external (host tools like kafkacat)
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_RETENTION_HOURS: 24
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qg"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+    restart: unless-stopped
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.7.0
+    hostname: schema-registry
+    container_name: wc-schema-registry
+    ports:
+      - "8082:8082"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:9092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8082
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: 1
+      SCHEMA_REGISTRY_DEBUG: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8082/subjects || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 20s
+    restart: unless-stopped
+
+  # Creates the required Kafka topics then exits
+  kafka-init:
+    image: confluentinc/cp-kafka:7.7.0
+    container_name: wc-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        echo 'Waiting for Kafka to be ready...'
+        cub kafka-ready -b kafka:9092 1 30
+        echo 'Creating topics...'
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 \
+          --replication-factor 1 --partitions 4 --topic raw-events
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 \
+          --replication-factor 1 --partitions 2 --topic alerts
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 \
+          --replication-factor 1 --partitions 2 --topic processed-events
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 \
+          --replication-factor 1 --partitions 1 --topic dead-letter
+        echo 'Topics ready:'
+        kafka-topics --list --bootstrap-server kafka:9092
+    restart: "no"
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: wc-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: whitechristmas
+      POSTGRES_PASSWORD: whitechristmas
+      POSTGRES_DB: whitechristmas
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U whitechristmas -d whitechristmas"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  mongodb:
+    image: mongo:7.0
+    container_name: wc-mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: whitechristmas
+      MONGO_INITDB_ROOT_PASSWORD: whitechristmas
+      MONGO_INITDB_DATABASE: whitechristmas
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval \"db.adminCommand('ping').ok\" || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # ── Application services ────────────────────────────────────────────────────
+
+  # Spark Structured Streaming: raw-events (Avro) → enriched alerts → Kafka + DB
+  spark-streaming:
+    build:
+      context: .
+      dockerfile: src/spark-jobs/Dockerfile
+    container_name: wc-spark-streaming
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      POSTGRES_CONN_STRING: ${POSTGRES_CONN_STRING:-postgresql://whitechristmas:whitechristmas@postgres:5432/whitechristmas}
+      MONGODB_CONN_STRING: ${MONGODB_CONN_STRING:-mongodb://whitechristmas:whitechristmas@mongodb:27017/whitechristmas?authSource=admin}
+      AVRO_SCHEMA_PATH: /schemas/crime-event.avsc
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      schema-registry:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    volumes:
+      - spark_checkpoint:/tmp/spark-checkpoint
+    restart: unless-stopped
+
+  # Go WebSocket API + analytics endpoints + Prometheus metrics
+  api:
+    build:
+      context: .
+      dockerfile: src/api/Dockerfile
+    container_name: wc-api
+    ports:
+      - "8081:8081"
+    environment:
+      API_PORT: "8081"
+      KAFKA_BROKERS: kafka:9092
+      ALERTS_TOPIC: alerts
+      POSTGRES_CONN_STRING: ${POSTGRES_CONN_STRING:-postgresql://whitechristmas:whitechristmas@postgres:5432/whitechristmas}
+      MONGODB_CONN_STRING: ${MONGODB_CONN_STRING:-mongodb://whitechristmas:whitechristmas@mongodb:27017/whitechristmas?authSource=admin}
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # Rust Kafka producer: CSV files → Avro → raw-events topic
+  # Starts after Schema Registry is ready; streams data at configured rate
+  producer:
+    build:
+      context: .
+      dockerfile: src/kafka-producer/Dockerfile
+    container_name: wc-producer
+    command:
+      - --csv-dir
+      - /data
+      - --kafka-brokers
+      - kafka:9092
+      - --schema-registry
+      - http://schema-registry:8082
+      - --topic
+      - raw-events
+      - --events-per-sec
+      - "${PRODUCER_RATE:-10}"
+    volumes:
+      - ./data:/data:ro
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      schema-registry:
+        condition: service_healthy
+    restart: on-failure
+
+  # Next.js dashboard: connects to api:8081 from the browser via exposed port
+  frontend:
+    build:
+      context: .
+      dockerfile: src/frontend/Dockerfile
+    container_name: wc-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Observability ────────────────────────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:v2.54.0
+    container_name: wc-prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: wc-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SERVER_HTTP_PORT: "3000"
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-whitechristmas}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+# ── Volumes ──────────────────────────────────────────────────────────────────
+
+volumes:
+  kafka_data:
+  postgres_data:
+  mongodb_data:
+  spark_checkpoint:
+  prometheus_data:
+  grafana_data:
+
+# ── Network ──────────────────────────────────────────────────────────────────
+
+networks:
+  default:
+    name: whitechristmas-net
+    driver: bridge

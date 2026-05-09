@@ -1,0 +1,43 @@
+# Git
+.git
+.gitignore
+
+# Nix / local tooling
+.direnv
+.local
+result
+result-*
+*.nix
+shell.nix
+flake.nix
+flake.lock
+
+# Editor / OS
+.idea
+.vscode
+*.swp
+*.swo
+.DS_Store
+
+# Compiled artifacts (rebuilt inside Docker)
+src/kafka-producer/target
+src/spark-jobs/target
+src/spark-jobs/project/target
+src/spark-jobs/project/project
+src/api/api
+src/frontend/.next
+src/frontend/node_modules
+src/frontend/.env*.local
+
+# Logs / runtime state
+logs
+*.log
+.local/data
+.local/logs
+.local/pids
+
+# Test / docs
+tests
+*.md
+!README.md
+run.md
