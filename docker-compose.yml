@@ -149,8 +149,8 @@ services:
       STREAM_INPUT_PATTERN: "raw-events-.*"
       BOLT_INPUT_PATTERN: "raw-events-.*"
       ANOMALY_TOPIC: anomaly-alerts
-      POSTGRES_CONN_STRING: ${POSTGRES_CONN_STRING:-postgresql://whitechristmas:whitechristmas@postgres:5432/whitechristmas}
-      MONGODB_CONN_STRING: ${MONGODB_CONN_STRING:-mongodb://whitechristmas:whitechristmas@mongodb:27017/whitechristmas?authSource=admin}
+      POSTGRES_CONN_STRING: "postgresql://whitechristmas:whitechristmas@postgres:5432/whitechristmas"
+      MONGODB_CONN_STRING: "mongodb://whitechristmas:whitechristmas@mongodb:27017/whitechristmas?authSource=admin"
       AVRO_SCHEMA_PATH: /schemas/crime-event.avsc
     depends_on:
       kafka-init:
@@ -177,8 +177,8 @@ services:
       API_PORT: "8081"
       KAFKA_BROKERS: kafka:9092
       ALERTS_TOPICS: "alerts-crimes,alerts-violence,alerts-arrests,alerts-sex-offenders"
-      POSTGRES_CONN_STRING: ${POSTGRES_CONN_STRING:-postgresql://whitechristmas:whitechristmas@postgres:5432/whitechristmas}
-      MONGODB_CONN_STRING: ${MONGODB_CONN_STRING:-mongodb://whitechristmas:whitechristmas@mongodb:27017/whitechristmas?authSource=admin}
+      POSTGRES_CONN_STRING: "postgresql://whitechristmas:whitechristmas@postgres:5432/whitechristmas"
+      MONGODB_CONN_STRING: "mongodb://whitechristmas:whitechristmas@mongodb:27017/whitechristmas?authSource=admin"
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -211,7 +211,7 @@ services:
       - --loop-forever
       - --per-dataset-topics
       - --events-per-sec
-      - "${PRODUCER_RATE:-40}"
+      - "${PRODUCER_RATE:-10}"
     volumes:
       - ./data:/data:ro
     depends_on:
@@ -240,7 +240,7 @@ services:
       - /app/app.jar
       - com.whitechristmas.spark.BatchAnalytics
     environment:
-      POSTGRES_CONN_STRING: ${POSTGRES_CONN_STRING:-postgresql://whitechristmas:whitechristmas@postgres:5432/whitechristmas}
+      POSTGRES_CONN_STRING: "postgresql://whitechristmas:whitechristmas@postgres:5432/whitechristmas"
       DATA_DIR: /data
       KMEANS_K: "10"
       MIN_CRIMES_FOR_RATE: "100"
@@ -300,7 +300,8 @@ services:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-whitechristmas}
       GF_USERS_ALLOW_SIGN_UP: "false"
-      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
     volumes:
       - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
