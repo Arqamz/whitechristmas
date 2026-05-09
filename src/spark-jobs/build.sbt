@@ -45,20 +45,21 @@ fork := true
 assembly / assemblyJarName := "whitechristmas-spark-assembly.jar"
 
 assembly / assemblyMergeStrategy := {
-  case PathList("META-INF", "MANIFEST.MF")           => MergeStrategy.discard
-  case PathList("META-INF", "INDEX.LIST")             => MergeStrategy.discard
-  case PathList("META-INF", "DEPENDENCIES")           => MergeStrategy.discard
-  case PathList("META-INF", "LICENSE")                => MergeStrategy.discard
-  case PathList("META-INF", "LICENSE.txt")            => MergeStrategy.discard
-  case PathList("META-INF", "NOTICE")                 => MergeStrategy.discard
-  case PathList("META-INF", "NOTICE.txt")             => MergeStrategy.discard
-  case PathList("META-INF", "io.netty.versions.properties") => MergeStrategy.discard
-  case PathList("META-INF", "native-image", _*)       => MergeStrategy.discard
-  case PathList("META-INF", "services", _*)           => MergeStrategy.concat
-  case PathList("META-INF", _*)                       => MergeStrategy.discard
-  case PathList("reference.conf")                     => MergeStrategy.concat
-  case PathList("application.conf")                   => MergeStrategy.concat
-  case PathList("log4j2.properties")                  => MergeStrategy.first
-  case PathList("module-info.class")                  => MergeStrategy.discard
-  case _                                              => MergeStrategy.first
+  case PathList("META-INF", "MANIFEST.MF")  => MergeStrategy.discard
+  case PathList("META-INF", "INDEX.LIST")   => MergeStrategy.discard
+  case PathList("META-INF", "DEPENDENCIES") => MergeStrategy.discard
+  case PathList("META-INF", "LICENSE")      => MergeStrategy.discard
+  case PathList("META-INF", "LICENSE.txt")  => MergeStrategy.discard
+  case PathList("META-INF", "NOTICE")       => MergeStrategy.discard
+  case PathList("META-INF", "NOTICE.txt")   => MergeStrategy.discard
+  case PathList("META-INF", "io.netty.versions.properties") =>
+    MergeStrategy.discard
+  case PathList("META-INF", "native-image", _*) => MergeStrategy.discard
+  case PathList("META-INF", "services", _*)     => MergeStrategy.concat
+  case PathList("META-INF", _*)                 => MergeStrategy.discard
+  case PathList("reference.conf")               => MergeStrategy.concat
+  case PathList("application.conf")             => MergeStrategy.concat
+  case PathList("log4j2.properties")            => MergeStrategy.first
+  case PathList("module-info.class")            => MergeStrategy.discard
+  case _                                        => MergeStrategy.first
 }
