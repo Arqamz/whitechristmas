@@ -65,10 +65,56 @@ interface Correlation {
   metric_b: number | null;
 }
 
+interface SeverityStat {
+  severity: number;
+  count: number;
+}
+
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const API = 'http://localhost:8081';
 const WS = 'ws://localhost:8081/ws';
+
+// ── Debug logger ───────────────────────────────────────────────────────────
+
+const L = {
+  group: (label: string) =>
+    console.group(`%c[WC] ${label}`, 'color:#00d4ff;font-weight:bold'),
+  groupEnd: () => console.groupEnd(),
+  info: (msg: string, ...a: unknown[]) =>
+    console.log(`%c[WC] ${msg}`, 'color:#00d4ff', ...a),
+  ok: (msg: string, ...a: unknown[]) =>
+    console.log(`%c[WC] ✓ ${msg}`, 'color:#3fb950', ...a),
+  warn: (msg: string, ...a: unknown[]) =>
+    console.warn(`%c[WC] ⚠ ${msg}`, 'color:#ffd93d', ...a),
+  err: (msg: string, ...a: unknown[]) =>
+    console.error(`%c[WC] ✗ ${msg}`, 'color:#ff4e42', ...a),
+};
+
+async function apiFetch(
+  url: string
+): Promise<{ ok: boolean; status: number; body: unknown }> {
+  L.info(`fetch → ${url}`);
+  try {
+    const r = await fetch(url);
+    let body: unknown;
+    const text = await r.text();
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = text;
+    }
+    if (r.ok) {
+      L.ok(`${r.status} ← ${url}`, body);
+    } else {
+      L.err(`${r.status} ← ${url}`, body);
+    }
+    return { ok: r.ok, status: r.status, body };
+  } catch (e) {
+    L.err(`NETWORK ERROR ← ${url}`, e);
+    return { ok: false, status: 0, body: null };
+  }
+}
 
 const DATASET_COLORS: Record<
   string,
@@ -343,11 +389,24 @@ function TrendsChart({ trends }: { trends: Trend[] }) {
   return <div ref={ref} className="w-full h-full" />;
 }
 
-function SeverityChart({ events }: { events: CrimeEvent[] }) {
+function SeverityChart({
+  events,
+  dbStats,
+}: {
+  events: CrimeEvent[];
+  dbStats: SeverityStat[];
+}) {
   const ref = useRef<HTMLDivElement>(null);
-  const counts = [1, 2, 3, 4, 5].map(
-    (s) => events.filter((e) => e.severity === s).length
-  );
+
+  // Prefer cumulative DB counts; fall back to live buffer when DB unavailable
+  const counts =
+    dbStats.length > 0
+      ? [1, 2, 3, 4, 5].map(
+          (s) => dbStats.find((d) => d.severity === s)?.count ?? 0
+        )
+      : [1, 2, 3, 4, 5].map(
+          (s) => events.filter((e) => e.severity === s).length
+        );
   const total = counts.reduce((a, b) => a + b, 0);
 
   useEChart(
@@ -384,9 +443,14 @@ function SeverityChart({ events }: { events: CrimeEvent[] }) {
           left: 'center',
           top: 'middle',
           style: {
-            text: total > 0 ? String(total) : '—',
+            text:
+              total > 0
+                ? total >= 1000
+                  ? `${(total / 1000).toFixed(1)}k`
+                  : String(total)
+                : '—',
             fill: '#c9d1d9',
-            fontSize: total >= 1000 ? 14 : 18,
+            fontSize: total >= 10000 ? 13 : 18,
             fontWeight: 'bold',
             fontFamily: 'monospace',
           },
@@ -400,7 +464,8 @@ function SeverityChart({ events }: { events: CrimeEvent[] }) {
         formatter: '{b}: {c} ({d}%)',
       },
     }),
-    [events.length]
+
+    [...counts]
   );
 
   return <div ref={ref} className="w-full h-full" />;
@@ -814,22 +879,23 @@ export default function Home() {
   >([]);
   const [correlations, setCorrelations] = useState<Correlation[]>([]);
   const [datasetStats, setDatasetStats] = useState<DatasetStat[]>([]);
+  const [severityStats, setSeverityStats] = useState<SeverityStat[]>([]);
   const [clock, setClock] = useState('');
 
   const tsBuffer = useRef<number[]>([]);
 
   // Historical replay handlers
   const handleReplay = useCallback(async (offset: number, limit: number) => {
-    try {
-      const r = await fetch(
-        `${API}/events/history?limit=${limit}&offset=${offset}`
-      );
-      if (r.ok) {
-        const data = await r.json();
-        setReplayEvents(data.events ?? []);
-        setIsReplay(true);
-      }
-    } catch {}
+    const { ok, body } = await apiFetch(
+      `${API}/events/history?limit=${limit}&offset=${offset}`
+    );
+    if (ok) {
+      const data = body as { events?: CrimeEvent[] };
+      const evs = data.events ?? [];
+      L.info(`replay loaded ${evs.length} events (offset=${offset})`);
+      setReplayEvents(evs);
+      setIsReplay(true);
+    }
   }, []);
 
   const handleLive = useCallback(() => {
@@ -847,14 +913,38 @@ export default function Home() {
   }, []);
 
   // WebSocket
+  const wsAttemptRef = useRef(0);
   const connectWS = useCallback(() => {
-    setWsStatus('connecting');
-    const ws = new WebSocket(WS);
+    const attempt = ++wsAttemptRef.current;
+    L.group(`WebSocket attempt #${attempt}`);
+    L.info(`connecting to ${WS}`);
+    L.info(`readyState before new WebSocket: N/A (creating)`);
+    L.groupEnd();
 
-    ws.onopen = () => setWsStatus('connected');
+    setWsStatus('connecting');
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(WS);
+    } catch (e) {
+      L.err(`WebSocket constructor threw`, e);
+      setTimeout(connectWS, 3000);
+      return;
+    }
+
+    ws.onopen = () => {
+      L.ok(`WebSocket OPEN (attempt #${attempt}) readyState=${ws.readyState}`);
+      setWsStatus('connected');
+    };
 
     ws.onmessage = (e) => {
-      const msg = JSON.parse(e.data);
+      let msg: { type: string; data: unknown };
+      try {
+        msg = JSON.parse(e.data);
+      } catch (err) {
+        L.err(`WebSocket message parse failed`, e.data, err);
+        return;
+      }
+      L.info(`WebSocket message type="${msg.type}"`, msg.data);
       if (msg.type === 'event') {
         const ev = msg.data as CrimeEvent;
         tsBuffer.current.push(Date.now());
@@ -862,25 +952,46 @@ export default function Home() {
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (e) => {
+      L.warn(
+        `WebSocket CLOSED (attempt #${attempt}) code=${e.code} reason="${e.reason}" wasClean=${e.wasClean}`
+      );
       setWsStatus('disconnected');
       setTimeout(connectWS, 3000);
     };
 
-    ws.onerror = () => ws.close();
+    ws.onerror = (e) => {
+      L.err(
+        `WebSocket ERROR (attempt #${attempt}) readyState=${ws.readyState}`,
+        e
+      );
+      ws.close();
+    };
   }, []);
 
   useEffect(() => {
     connectWS();
   }, [connectWS]);
 
+  // Log mount
+  useEffect(() => {
+    L.group('Dashboard mounted');
+    L.info(`API base: ${API}`);
+    L.info(`WS url:   ${WS}`);
+    L.groupEnd();
+  }, []);
+
   // Stats poll (2 s)
   useEffect(() => {
     const poll = async () => {
-      try {
-        const r = await fetch(`${API}/stats`);
-        if (r.ok) setStats(await r.json());
-      } catch {}
+      const { ok, body } = await apiFetch(`${API}/stats`);
+      if (ok) {
+        const s = body as Stats;
+        L.info(
+          `stats updated — total_events=${s.total_events} connected_clients=${s.connected_clients}`
+        );
+        setStats(s);
+      }
     };
     poll();
     const id = setInterval(poll, 2000);
@@ -890,13 +1001,13 @@ export default function Home() {
   // Districts poll (15 s)
   useEffect(() => {
     const poll = async () => {
-      try {
-        const r = await fetch(`${API}/districts/summary`);
-        if (r.ok) {
-          const data = await r.json();
-          setDistricts(data.districts ?? []);
-        }
-      } catch {}
+      const { ok, body } = await apiFetch(`${API}/districts/summary`);
+      if (ok) {
+        const data = body as { districts?: DistrictStat[] };
+        const districts = data.districts ?? [];
+        L.info(`districts updated — ${districts.length} districts`);
+        setDistricts(districts);
+      }
     };
     poll();
     const id = setInterval(poll, 15_000);
@@ -906,13 +1017,16 @@ export default function Home() {
   // Dataset summary poll (15 s)
   useEffect(() => {
     const poll = async () => {
-      try {
-        const r = await fetch(`${API}/datasets/summary`);
-        if (r.ok) {
-          const data = await r.json();
-          setDatasetStats(data.datasets ?? []);
-        }
-      } catch {}
+      const { ok, body } = await apiFetch(`${API}/datasets/summary`);
+      if (ok) {
+        const data = body as { datasets?: DatasetStat[] };
+        const datasets = data.datasets ?? [];
+        L.info(
+          `dataset stats updated — ${datasets.length} datasets`,
+          datasets.map((d) => `${d.dataset}:${d.total_events}`)
+        );
+        setDatasetStats(datasets);
+      }
     };
     poll();
     const id = setInterval(poll, 15_000);
@@ -922,20 +1036,26 @@ export default function Home() {
   // Analytics poll (5 min — batch data changes infrequently)
   useEffect(() => {
     const poll = async () => {
-      try {
-        const [h, a, ct, co] = await Promise.all([
-          fetch(`${API}/analytics/hotspots`).then((r) => r.json()),
-          fetch(`${API}/analytics/arrest-rates`).then((r) => r.json()),
-          fetch(`${API}/analytics/crime-trends`).then((r) => r.json()),
-          fetch(`${API}/analytics/correlations?type=district`).then((r) =>
-            r.json()
-          ),
-        ]);
-        setHotspots(h.data ?? []);
-        setArrestRates(a.data ?? []);
-        setCrimeTrendsMonthly(ct.data ?? []);
-        setCorrelations(co.data ?? []);
-      } catch {}
+      L.group('Analytics batch poll');
+      const [h, a, ct, co] = await Promise.all([
+        apiFetch(`${API}/analytics/hotspots`),
+        apiFetch(`${API}/analytics/arrest-rates`),
+        apiFetch(`${API}/analytics/crime-trends`),
+        apiFetch(`${API}/analytics/correlations?type=district`),
+      ]);
+      L.info(`hotspots ok=${h.ok}`, h.body);
+      L.info(`arrest-rates ok=${a.ok}`, a.body);
+      L.info(`crime-trends ok=${ct.ok}`, ct.body);
+      L.info(`correlations ok=${co.ok}`, co.body);
+      L.groupEnd();
+      if (h.ok) setHotspots((h.body as { data?: Hotspot[] }).data ?? []);
+      if (a.ok) setArrestRates((a.body as { data?: ArrestRate[] }).data ?? []);
+      if (ct.ok)
+        setCrimeTrendsMonthly(
+          (ct.body as { data?: CrimeTrendMonthly[] }).data ?? []
+        );
+      if (co.ok)
+        setCorrelations((co.body as { data?: Correlation[] }).data ?? []);
     };
     poll();
     const id = setInterval(poll, 300_000);
@@ -945,13 +1065,27 @@ export default function Home() {
   // Trends poll (30 s)
   useEffect(() => {
     const poll = async () => {
-      try {
-        const r = await fetch(`${API}/analytics/trends?hours=24`);
-        if (r.ok) {
-          const data = await r.json();
-          setTrends(data.trends ?? []);
-        }
-      } catch {}
+      const { ok, body } = await apiFetch(`${API}/analytics/trends?hours=24`);
+      if (ok) {
+        const data = body as { trends?: Trend[] };
+        const t = data.trends ?? [];
+        L.info(`trends updated — ${t.length} hourly buckets`);
+        setTrends(t);
+      }
+    };
+    poll();
+    const id = setInterval(poll, 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Severity distribution poll (30 s) — cumulative from DB
+  useEffect(() => {
+    const poll = async () => {
+      const { ok, body } = await apiFetch(`${API}/analytics/severity`);
+      if (ok) {
+        const data = body as { data?: SeverityStat[] };
+        setSeverityStats(data.data ?? []);
+      }
     };
     poll();
     const id = setInterval(poll, 30_000);
@@ -1204,11 +1338,11 @@ export default function Home() {
             style={{ color: 'var(--text-muted)' }}
           >
             Severity Profile&nbsp;
-            <span style={{ color: 'var(--text-dim)' }}>— live feed</span>
+            <span style={{ color: 'var(--text-dim)' }}>— all time</span>
           </div>
           <div className="flex-1 min-h-0 pb-1">
-            {events.length > 0 ? (
-              <SeverityChart events={events} />
+            {severityStats.length > 0 || events.length > 0 ? (
+              <SeverityChart events={events} dbStats={severityStats} />
             ) : (
               <EmptyChart label="No events yet" />
             )}
