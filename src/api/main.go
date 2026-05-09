@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -130,16 +132,27 @@ func (h *EventHub) Run() {
 			log.Printf("WebSocket client disconnected. Total clients: %d", len(h.clients))
 
 		case message := <-h.broadcast:
-			h.mu.RLock()
+			h.mu.Lock()
+			var failed []*websocket.Conn
 			for client := range h.clients {
 				if err := client.WriteJSON(message); err != nil {
 					metricBroadcastErrors.Inc()
-					h.mu.RUnlock()
-					h.unregister <- client
-					h.mu.RLock()
+					failed = append(failed, client)
 				}
 			}
-			h.mu.RUnlock()
+			for _, client := range failed {
+				delete(h.clients, client)
+				_ = client.Close()
+				metricWSClients.Dec()
+			}
+			h.mu.Unlock()
+			if len(failed) > 0 {
+				log.Printf("WebSocket: removed %d dead clients. Total: %d", len(failed), func() int {
+					h.mu.RLock()
+					defer h.mu.RUnlock()
+					return len(h.clients)
+				}())
+			}
 		}
 	}
 }
@@ -165,7 +178,12 @@ func (h *EventHub) BroadcastEvent(event *CrimeEvent) {
 		Timestamp: time.Now().UnixMilli(),
 		Data:      event,
 	}
-	h.broadcast <- msg
+	select {
+	case h.broadcast <- msg:
+	default:
+		metricBroadcastErrors.Inc()
+		log.Printf("WebSocket broadcast channel full, dropping event")
+	}
 }
 
 // GetConnectedClients returns the number of connected clients
@@ -297,6 +315,15 @@ type statusWriter struct {
 func (sw *statusWriter) WriteHeader(code int) {
 	sw.status = code
 	sw.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack delegates to the underlying ResponseWriter so WebSocket upgrades work.
+func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := sw.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
+	}
+	return h.Hijack()
 }
 
 // corsMiddleware adds CORS headers so the Next.js dev server on :3000 can reach the API on :8081.
@@ -590,12 +617,13 @@ func DistrictSummaryHandler() http.HandlerFunc {
 
 		rows, err := pgDB.QueryContext(ctx, `
 			SELECT
-				COALESCE(district, 'Unknown') AS district,
+				district,
 				COUNT(*) AS total_events,
 				COALESCE(AVG(severity), 0) AS avg_severity,
 				SUM(CASE WHEN severity >= 4 THEN 1 ELSE 0 END) AS critical_count,
 				MAX(processed_at) AS last_seen
 			FROM events
+			WHERE district IS NOT NULL
 			GROUP BY district
 			ORDER BY total_events DESC`)
 		if err != nil {
@@ -650,7 +678,7 @@ func TrendsHandler() http.HandlerFunc {
 				COUNT(*) AS event_count,
 				COALESCE(AVG(severity), 0) AS avg_severity
 			FROM events
-			WHERE processed_at > NOW() - ($1 || ' hours')::INTERVAL
+			WHERE processed_at > NOW() - $1 * INTERVAL '1 hour'
 			GROUP BY hour
 			ORDER BY hour ASC`, hours)
 		if err != nil {
@@ -1150,11 +1178,12 @@ func main() {
 
 	// Create server
 	srv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      r,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:        ":" + port,
+		Handler:     r,
+		ReadTimeout: 15 * time.Second,
+		// WriteTimeout intentionally omitted — WebSocket connections are long-lived
+		// and a write deadline would kill them after 15 s.
+		IdleTimeout: 60 * time.Second,
 	}
 
 	// Start server in goroutine
