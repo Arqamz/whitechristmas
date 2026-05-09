@@ -5,7 +5,7 @@ use rdkafka::config::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use serde::Deserialize;
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
@@ -92,7 +92,7 @@ enum DatasetType {
 }
 
 impl DatasetType {
-    fn from_filename(path: &PathBuf) -> Self {
+    fn from_filename(path: &Path) -> Self {
         let name = path
             .file_name()
             .unwrap_or_default()
@@ -193,6 +193,7 @@ struct ArrestRow {
     #[serde(rename = "ARREST DATE")]
     arrest_date: Option<String>,
     #[serde(rename = "RACE")]
+    #[allow(dead_code)]
     race: Option<String>,
     #[serde(rename = "CHARGE 1 DESCRIPTION")]
     charge_description: Option<String>,
@@ -214,8 +215,10 @@ struct SexOffenderRow {
     #[serde(rename = "BLOCK")]
     block: Option<String>,
     #[serde(rename = "GENDER")]
+    #[allow(dead_code)]
     gender: Option<String>,
     #[serde(rename = "RACE")]
+    #[allow(dead_code)]
     race: Option<String>,
     #[serde(rename = "BIRTH DATE")]
     birth_date: Option<String>,
@@ -447,7 +450,7 @@ fn split_datetime(s: Option<&str>) -> (String, Option<String>) {
                 let date = s[..space].to_string();
                 let rest = s[space + 1..].trim();
                 // drop AM/PM suffix if present
-                let time = rest.splitn(2, ' ').next().map(|t| t.to_string());
+                let time = rest.split(' ').next().map(|t| t.to_string());
                 (date, time)
             } else {
                 (s.to_string(), None)
@@ -551,6 +554,7 @@ fn to_avro_record(event: UnifiedEvent, schema: &Schema, schema_id: u32) -> Resul
 
 /// Stream one CSV of a known type, yielding UnifiedEvents.
 /// Returns (rows_read, rows_published).
+#[allow(clippy::too_many_arguments)]
 async fn stream_csv(
     path: &PathBuf,
     dataset_type: &DatasetType,
@@ -598,7 +602,7 @@ async fn stream_csv(
                     Ok(_) => {
                         published += 1;
                         *total_published += 1;
-                        if published <= 5 || published % 500 == 0 {
+                        if published <= 5 || published.is_multiple_of(500) {
                             info!(
                                 "  [{dataset}] #{published} published (row {read})",
                                 dataset = dataset_type.label()
@@ -801,7 +805,7 @@ async fn main() -> Result<()> {
         let (read, published) =
             stream_json_crimes(&crimes_path, &producer, &topic, delay_ms, args.max_events).await?;
 
-        producer.flush(Duration::from_secs(10));
+        let _ = producer.flush(Duration::from_secs(10));
         info!("Done — read: {read}, published: {published}");
         return Ok(());
     }
@@ -933,6 +937,6 @@ async fn main() -> Result<()> {
         grand_total_read, total_published
     );
 
-    producer.flush(Duration::from_secs(10));
+    let _ = producer.flush(Duration::from_secs(10));
     Ok(())
 }

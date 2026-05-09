@@ -123,7 +123,7 @@ func (h *EventHub) Run() {
 			delete(h.clients, client)
 			h.mu.Unlock()
 			metricWSClients.Dec()
-			client.Close()
+			_ = client.Close()
 			log.Printf("WebSocket client disconnected. Total clients: %d", len(h.clients))
 
 		case message := <-h.broadcast:
@@ -203,7 +203,7 @@ func WebSocketHandler(hub *EventHub) http.HandlerFunc {
 				"version": "0.1.0",
 			},
 		}
-		conn.WriteJSON(welcomeMsg)
+		_ = conn.WriteJSON(welcomeMsg)
 
 		// Keep connection alive and handle any incoming messages
 		go func() {
@@ -235,7 +235,7 @@ func KafkaConsumer(hub *EventHub, kafkaBrokers, topic string) {
 		StartOffset:    kafka.LastOffset,
 		CommitInterval: time.Second,
 	})
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	log.Printf("📖 Kafka consumer started for topic: %s", topic)
 
@@ -256,7 +256,7 @@ func KafkaConsumer(hub *EventHub, kafkaBrokers, topic string) {
 
 		metricKafkaMessages.Inc()
 		hub.BroadcastEvent(&event)
-		reader.CommitMessages(context.Background(), msg)
+		_ = reader.CommitMessages(context.Background(), msg)
 
 		log.Printf("📨 Event #%d broadcast: %s (severity: %v)",
 			hub.GetEventCount(),
@@ -312,7 +312,7 @@ func StatsHandler(hub *EventHub) http.HandlerFunc {
 			"timestamp":         time.Now().UnixMilli(),
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(stats)
+		_ = json.NewEncoder(w).Encode(stats)
 	}
 }
 
@@ -325,7 +325,7 @@ func HealthHandler() http.HandlerFunc {
 			"version": "0.1.0",
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(health)
+		_ = json.NewEncoder(w).Encode(health)
 	}
 }
 
@@ -352,7 +352,7 @@ func initPostgres(connStr string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
-		db.Close()
+		_ = db.Close()
 		return fmt.Errorf("ping: %w", err)
 	}
 
@@ -441,7 +441,7 @@ CREATE INDEX IF NOT EXISTS idx_events_source_dataset ON events (source_dataset);
 CREATE INDEX IF NOT EXISTS idx_events_crime_type     ON events (crime_type);`
 
 	if _, err := db.ExecContext(ctx, ddl); err != nil {
-		db.Close()
+		_ = db.Close()
 		return fmt.Errorf("ddl: %w", err)
 	}
 
@@ -460,7 +460,7 @@ func initMongo(connStr string) error {
 		return fmt.Errorf("connect: %w", err)
 	}
 	if err := client.Ping(ctx, nil); err != nil {
-		client.Disconnect(ctx)
+		_ = client.Disconnect(ctx)
 		return fmt.Errorf("ping: %w", err)
 	}
 
@@ -537,7 +537,7 @@ func EventHistoryHandler() http.HandlerFunc {
 			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
 			return
 		}
-		defer queryRows.Close()
+		defer func() { _ = queryRows.Close() }()
 
 		var events []row
 		for queryRows.Next() {
@@ -559,7 +559,7 @@ func EventHistoryHandler() http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"events": events, "limit": limit, "offset": offset})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"events": events, "limit": limit, "offset": offset})
 	}
 }
 
@@ -597,7 +597,7 @@ func DistrictSummaryHandler() http.HandlerFunc {
 			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
 			return
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 
 		var districts []districtRow
 		for rows.Next() {
@@ -614,7 +614,7 @@ func DistrictSummaryHandler() http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"districts": districts})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"districts": districts})
 	}
 }
 
@@ -653,7 +653,7 @@ func TrendsHandler() http.HandlerFunc {
 			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
 			return
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 
 		var trends []trendRow
 		for rows.Next() {
@@ -670,7 +670,7 @@ func TrendsHandler() http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"trends": trends, "hours": hours})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"trends": trends, "hours": hours})
 	}
 }
 
@@ -700,7 +700,7 @@ func AlertsRecentHandler() http.HandlerFunc {
 			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
 			return
 		}
-		defer cursor.Close(ctx)
+		defer func() { _ = cursor.Close(ctx) }()
 
 		var alerts []bson.M
 		if err := cursor.All(ctx, &alerts); err != nil {
@@ -712,7 +712,7 @@ func AlertsRecentHandler() http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"alerts": alerts})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"alerts": alerts})
 	}
 }
 
@@ -755,14 +755,14 @@ func CrimeTrendsHandler() http.HandlerFunc {
 		}
 		if tableNotFound(err) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{"data": []struct{}{}, "status": "batch job not yet run"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": []struct{}{}, "status": "batch job not yet run"})
 			return
 		}
 		if err != nil {
 			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
 			return
 		}
-		defer qrows.Close()
+		defer func() { _ = qrows.Close() }()
 		var results []row
 		for qrows.Next() {
 			var rw row
@@ -775,7 +775,7 @@ func CrimeTrendsHandler() http.HandlerFunc {
 			results = []row{}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"data": results})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": results})
 	}
 }
 
@@ -804,14 +804,14 @@ func HotspotsHandler() http.HandlerFunc {
 			 FROM hotspots ORDER BY crime_count DESC`)
 		if tableNotFound(err) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{"data": []struct{}{}, "status": "batch job not yet run"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": []struct{}{}, "status": "batch job not yet run"})
 			return
 		}
 		if err != nil {
 			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
 			return
 		}
-		defer qrows.Close()
+		defer func() { _ = qrows.Close() }()
 		var results []row
 		for qrows.Next() {
 			var rw row
@@ -825,7 +825,7 @@ func HotspotsHandler() http.HandlerFunc {
 			results = []row{}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"data": results})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": results})
 	}
 }
 
@@ -864,14 +864,14 @@ func CorrelationsHandler() http.HandlerFunc {
 			 FROM correlations %s ORDER BY total_crimes DESC NULLS LAST LIMIT 25`, whereClause))
 		if tableNotFound(err) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{"data": []struct{}{}, "status": "batch job not yet run"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": []struct{}{}, "status": "batch job not yet run"})
 			return
 		}
 		if err != nil {
 			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
 			return
 		}
-		defer qrows.Close()
+		defer func() { _ = qrows.Close() }()
 		var results []row
 		for qrows.Next() {
 			var rw row
@@ -885,7 +885,7 @@ func CorrelationsHandler() http.HandlerFunc {
 			results = []row{}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"data": results})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": results})
 	}
 }
 
@@ -910,14 +910,14 @@ func ArrestRatesHandler() http.HandlerFunc {
 			 FROM top_arrest_rate_crime_types ORDER BY arrest_rate DESC`)
 		if tableNotFound(err) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{"data": []struct{}{}, "status": "batch job not yet run"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": []struct{}{}, "status": "batch job not yet run"})
 			return
 		}
 		if err != nil {
 			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
 			return
 		}
-		defer qrows.Close()
+		defer func() { _ = qrows.Close() }()
 		var results []row
 		for qrows.Next() {
 			var rw row
@@ -930,7 +930,7 @@ func ArrestRatesHandler() http.HandlerFunc {
 			results = []row{}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"data": results})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": results})
 	}
 }
 
@@ -959,14 +959,14 @@ func ViolenceHandler() http.HandlerFunc {
 			 FROM violence_analysis ORDER BY month, district`)
 		if tableNotFound(err) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{"data": []struct{}{}, "status": "batch job not yet run"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": []struct{}{}, "status": "batch job not yet run"})
 			return
 		}
 		if err != nil {
 			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
 			return
 		}
-		defer qrows.Close()
+		defer func() { _ = qrows.Close() }()
 		var results []row
 		for qrows.Next() {
 			var rw row
@@ -980,7 +980,7 @@ func ViolenceHandler() http.HandlerFunc {
 			results = []row{}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"data": results})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": results})
 	}
 }
 
@@ -1126,10 +1126,10 @@ func main() {
 	}
 
 	if pgDB != nil {
-		pgDB.Close()
+		_ = pgDB.Close()
 	}
 	if mongoClient != nil {
-		mongoClient.Disconnect(ctx)
+		_ = mongoClient.Disconnect(ctx)
 	}
 
 	fmt.Println("✅ Server stopped")

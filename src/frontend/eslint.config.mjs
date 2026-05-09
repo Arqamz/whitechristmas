@@ -10,7 +10,7 @@ export default [
   ...tsPlugin.configs["flat/recommended"],
   reactPlugin.configs.flat.recommended,
   reactPlugin.configs.flat["jsx-runtime"],
-  reactHooksPlugin.configs.recommended,
+  reactHooksPlugin.configs["recommended-latest"],
   {
     files: ["**/*.{ts,tsx,js,jsx}"],
     languageOptions: {
