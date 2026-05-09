@@ -70,6 +70,29 @@ interface SeverityStat {
   count: number;
 }
 
+interface ViolenceRow {
+  month: number;
+  district: string;
+  homicides: number;
+  non_fatal_shootings: number;
+  gunshot_incidents: number;
+  total_incidents: number;
+  gunshot_proportion_overall: number;
+}
+
+interface SexOffenderSummary {
+  total_offenders: number;
+  minor_victim_count: number;
+  priority_count: number;
+  standard_count: number;
+  by_race: { race: string; count: number }[];
+}
+
+interface CommunityCrimeRow {
+  community_area: string | null;
+  total_crimes: number | null;
+}
+
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const API = 'http://localhost:8081';
@@ -784,6 +807,231 @@ function EmptyChart({ label }: { label: string }) {
   );
 }
 
+function ViolenceMonthlyChart({ data }: { data: ViolenceRow[] }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const MONTHS = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+  const byMonth = Array.from({ length: 12 }, (_, i) => {
+    const rows = data.filter((r) => r.month === i + 1);
+    return {
+      homicides: rows.reduce((s, r) => s + r.homicides, 0),
+      non_fatal: rows.reduce((s, r) => s + r.non_fatal_shootings, 0),
+    };
+  });
+  const gsProportion = data.length > 0 ? data[0].gunshot_proportion_overall : 0;
+
+  useEChart(
+    ref,
+    () => ({
+      ...CHART_BASE,
+      grid: { left: 36, right: 8, top: 18, bottom: 28 },
+      legend: {
+        data: ['Homicides', 'Non-Fatal Shootings'],
+        textStyle: { color: '#8b949e', fontSize: 8 },
+        top: 0,
+        right: 0,
+      },
+      xAxis: {
+        type: 'category',
+        data: MONTHS,
+        axisLine: { lineStyle: { color: '#1e2d3d' } },
+        axisTick: { show: false },
+        axisLabel: { color: '#8b949e', fontSize: 8 },
+      },
+      yAxis: {
+        type: 'value',
+        axisLabel: { color: '#8b949e', fontSize: 9 },
+        splitLine: { lineStyle: { color: '#1e2d3d', type: 'dashed' } },
+        minInterval: 1,
+      },
+      series: [
+        {
+          name: 'Homicides',
+          type: 'bar',
+          stack: 'violence',
+          data: byMonth.map((m) => m.homicides),
+          itemStyle: { color: '#ff4e42' },
+          barMaxWidth: 18,
+        },
+        {
+          name: 'Non-Fatal Shootings',
+          type: 'bar',
+          stack: 'violence',
+          data: byMonth.map((m) => m.non_fatal),
+          itemStyle: { color: '#ff7b39' },
+          barMaxWidth: 18,
+        },
+      ],
+      graphic:
+        gsProportion > 0
+          ? [
+              {
+                type: 'text',
+                right: 8,
+                bottom: 32,
+                style: {
+                  text: `Gunshot: ${(gsProportion * 100).toFixed(1)}%`,
+                  fill: '#ffd93d',
+                  fontSize: 9,
+                  fontFamily: 'monospace',
+                },
+              },
+            ]
+          : [],
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: '#0d1117',
+        borderColor: '#1e2d3d',
+        textStyle: { color: '#c9d1d9', fontFamily: 'monospace', fontSize: 11 },
+      },
+    }),
+    [data]
+  );
+  return <div ref={ref} className="w-full h-full" />;
+}
+
+function SexOffenderChart({ data }: { data: SexOffenderSummary }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const top = [...data.by_race].slice(0, 8).reverse();
+
+  useEChart(
+    ref,
+    () => ({
+      ...CHART_BASE,
+      grid: { left: 70, right: 70, top: 4, bottom: 20 },
+      xAxis: {
+        type: 'value',
+        axisLabel: { color: '#8b949e', fontSize: 9 },
+        splitLine: { lineStyle: { color: '#1e2d3d', type: 'dashed' } },
+        minInterval: 1,
+      },
+      yAxis: {
+        type: 'category',
+        data: top.map((r) => r.race),
+        axisLine: { lineStyle: { color: '#1e2d3d' } },
+        axisTick: { show: false },
+        axisLabel: { color: '#8b949e', fontSize: 8 },
+      },
+      series: [
+        {
+          type: 'bar',
+          data: top.map((r) => ({
+            value: r.count,
+            itemStyle: { color: '#7b5ea7', borderRadius: [0, 2, 2, 0] },
+          })),
+          barMaxWidth: 12,
+          label: {
+            show: true,
+            position: 'right',
+            color: '#8b949e',
+            fontSize: 8,
+            fontFamily: 'monospace',
+          },
+        },
+      ],
+      graphic: [
+        {
+          type: 'text',
+          right: 8,
+          top: 4,
+          style: {
+            text: `PRIORITY: ${data.priority_count.toLocaleString()}`,
+            fill: '#ff4e42',
+            fontSize: 9,
+            fontFamily: 'monospace',
+          },
+        },
+        {
+          type: 'text',
+          right: 8,
+          top: 18,
+          style: {
+            text: `TOTAL: ${data.total_offenders.toLocaleString()}`,
+            fill: '#8b949e',
+            fontSize: 9,
+            fontFamily: 'monospace',
+          },
+        },
+      ],
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: '#0d1117',
+        borderColor: '#1e2d3d',
+        textStyle: { color: '#c9d1d9', fontFamily: 'monospace', fontSize: 11 },
+      },
+    }),
+    [data]
+  );
+  return <div ref={ref} className="w-full h-full" />;
+}
+
+function CommunityCrimeChart({ data }: { data: CommunityCrimeRow[] }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const top = [...data]
+    .sort((a, b) => (b.total_crimes ?? 0) - (a.total_crimes ?? 0))
+    .slice(0, 10)
+    .reverse();
+
+  useEChart(
+    ref,
+    () => ({
+      ...CHART_BASE,
+      grid: { left: 28, right: 50, top: 4, bottom: 20 },
+      xAxis: {
+        type: 'value',
+        axisLabel: { color: '#8b949e', fontSize: 9 },
+        splitLine: { lineStyle: { color: '#1e2d3d', type: 'dashed' } },
+        minInterval: 1,
+      },
+      yAxis: {
+        type: 'category',
+        data: top.map((r) => `CA ${r.community_area}`),
+        axisLine: { lineStyle: { color: '#1e2d3d' } },
+        axisTick: { show: false },
+        axisLabel: { color: '#8b949e', fontSize: 8 },
+      },
+      series: [
+        {
+          type: 'bar',
+          data: top.map((r) => ({
+            value: r.total_crimes ?? 0,
+            itemStyle: { color: '#4d96ff', borderRadius: [0, 2, 2, 0] },
+          })),
+          barMaxWidth: 12,
+          label: {
+            show: true,
+            position: 'right',
+            color: '#8b949e',
+            fontSize: 8,
+            fontFamily: 'monospace',
+            formatter: (p: { value: number }) => p.value.toLocaleString(),
+          },
+        },
+      ],
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: '#0d1117',
+        borderColor: '#1e2d3d',
+        textStyle: { color: '#c9d1d9', fontFamily: 'monospace', fontSize: 11 },
+      },
+    }),
+    [data]
+  );
+  return <div ref={ref} className="w-full h-full" />;
+}
+
 // ── Time slider (historical replay) ───────────────────────────────────────
 
 function TimeSlider({
@@ -909,6 +1157,13 @@ export default function Home() {
   const [correlations, setCorrelations] = useState<Correlation[]>([]);
   const [datasetStats, setDatasetStats] = useState<DatasetStat[]>([]);
   const [severityStats, setSeverityStats] = useState<SeverityStat[]>([]);
+  const [violence, setViolence] = useState<ViolenceRow[]>([]);
+  const [sexOffenders, setSexOffenders] = useState<SexOffenderSummary | null>(
+    null
+  );
+  const [communityCorrelations, setCommunityCorrelations] = useState<
+    CommunityCrimeRow[]
+  >([]);
   const [clock, setClock] = useState('');
 
   const tsBuffer = useRef<number[]>([]);
@@ -1066,16 +1321,22 @@ export default function Home() {
   useEffect(() => {
     const poll = async () => {
       L.group('Analytics batch poll');
-      const [h, a, ct, co] = await Promise.all([
+      const [h, a, ct, co, v, so, cc] = await Promise.all([
         apiFetch(`${API}/analytics/hotspots`),
         apiFetch(`${API}/analytics/arrest-rates`),
         apiFetch(`${API}/analytics/crime-trends`),
         apiFetch(`${API}/analytics/correlations?type=district`),
+        apiFetch(`${API}/analytics/violence`),
+        apiFetch(`${API}/analytics/sex-offenders`),
+        apiFetch(`${API}/analytics/correlations?type=community`),
       ]);
       L.info(`hotspots ok=${h.ok}`, h.body);
       L.info(`arrest-rates ok=${a.ok}`, a.body);
       L.info(`crime-trends ok=${ct.ok}`, ct.body);
       L.info(`correlations ok=${co.ok}`, co.body);
+      L.info(`violence ok=${v.ok}`, v.body);
+      L.info(`sex-offenders ok=${so.ok}`, so.body);
+      L.info(`community-correlations ok=${cc.ok}`, cc.body);
       L.groupEnd();
       if (h.ok) setHotspots((h.body as { data?: Hotspot[] }).data ?? []);
       if (a.ok) setArrestRates((a.body as { data?: ArrestRate[] }).data ?? []);
@@ -1085,6 +1346,30 @@ export default function Home() {
         );
       if (co.ok)
         setCorrelations((co.body as { data?: Correlation[] }).data ?? []);
+      if (v.ok) setViolence((v.body as { data?: ViolenceRow[] }).data ?? []);
+      if (so.ok) {
+        const d = (so.body as { data?: SexOffenderSummary }).data;
+        if (d && d.total_offenders !== undefined) setSexOffenders(d);
+      }
+      if (cc.ok) {
+        const rows =
+          (
+            cc.body as {
+              data?: {
+                community_area: string | null;
+                metric_a: number | null;
+              }[];
+            }
+          ).data ?? [];
+        setCommunityCorrelations(
+          rows
+            .filter((r) => r.community_area && r.metric_a != null)
+            .map((r) => ({
+              community_area: r.community_area,
+              total_crimes: r.metric_a,
+            }))
+        );
+      }
     };
     poll();
     const id = setInterval(poll, 300_000);
@@ -1469,12 +1754,77 @@ export default function Home() {
           >
             Correlations&nbsp;
             <span style={{ color: 'var(--text-dim)' }}>
-              — arrest vs violence rate
+              — arrest vs violence rate by district
             </span>
           </div>
           <div className="flex-1 min-h-0 pb-1 px-1">
             {correlations.length > 0 ? (
               <CorrelationChart data={correlations} />
+            ) : (
+              <EmptyChart label="Run BatchAnalytics to populate" />
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Charts — row 3: violence, sex offender proximity, community crime (7.3 / 7.4 / 7.6) */}
+      <div
+        className="flex-none grid grid-cols-3 border-t"
+        style={{ height: 160, borderColor: 'var(--border)' }}
+      >
+        <div
+          className="flex flex-col border-r"
+          style={{ borderColor: 'var(--border)' }}
+        >
+          <div
+            className="flex-none px-3 pt-2 pb-0.5 text-[10px] uppercase tracking-wider"
+            style={{ color: 'var(--text-muted)' }}
+          >
+            Violence Analysis&nbsp;
+            <span style={{ color: 'var(--text-dim)' }}>
+              — homicides &amp; shootings by month
+            </span>
+          </div>
+          <div className="flex-1 min-h-0 pb-1 px-1">
+            {violence.length > 0 ? (
+              <ViolenceMonthlyChart data={violence} />
+            ) : (
+              <EmptyChart label="Run BatchAnalytics to populate" />
+            )}
+          </div>
+        </div>
+        <div
+          className="flex flex-col border-r"
+          style={{ borderColor: 'var(--border)' }}
+        >
+          <div
+            className="flex-none px-3 pt-2 pb-0.5 text-[10px] uppercase tracking-wider"
+            style={{ color: 'var(--text-muted)' }}
+          >
+            Sex Offender Proximity&nbsp;
+            <span style={{ color: 'var(--text-dim)' }}>
+              — by race · priority flagged
+            </span>
+          </div>
+          <div className="flex-1 min-h-0 pb-1 px-1">
+            {sexOffenders && sexOffenders.total_offenders > 0 ? (
+              <SexOffenderChart data={sexOffenders} />
+            ) : (
+              <EmptyChart label="Run BatchAnalytics to populate" />
+            )}
+          </div>
+        </div>
+        <div className="flex flex-col">
+          <div
+            className="flex-none px-3 pt-2 pb-0.5 text-[10px] uppercase tracking-wider"
+            style={{ color: 'var(--text-muted)' }}
+          >
+            Crime by Community Area&nbsp;
+            <span style={{ color: 'var(--text-dim)' }}>— top 10</span>
+          </div>
+          <div className="flex-1 min-h-0 pb-1 px-1">
+            {communityCorrelations.length > 0 ? (
+              <CommunityCrimeChart data={communityCorrelations} />
             ) : (
               <EmptyChart label="Run BatchAnalytics to populate" />
             )}
