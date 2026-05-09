@@ -1073,6 +1073,47 @@ func ViolenceHandler() http.HandlerFunc {
 	}
 }
 
+// SeverityHandler serves GET /analytics/severity
+// Returns cumulative event counts grouped by severity level from the events table.
+func SeverityHandler() http.HandlerFunc {
+	type severityRow struct {
+		Severity int   `json:"severity"`
+		Count    int64 `json:"count"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if pgDB == nil {
+			http.Error(w, `{"error":"PostgreSQL not connected"}`, http.StatusServiceUnavailable)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		rows, err := pgDB.QueryContext(ctx, `
+			SELECT COALESCE(severity, 1) AS severity, COUNT(*) AS count
+			FROM events
+			GROUP BY severity
+			ORDER BY severity`)
+		if err != nil {
+			log.Printf("analytics/severity query: %v", err)
+			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
+			return
+		}
+		defer func() { _ = rows.Close() }()
+		var results []severityRow
+		for rows.Next() {
+			var sr severityRow
+			if err := rows.Scan(&sr.Severity, &sr.Count); err != nil {
+				continue
+			}
+			results = append(results, sr)
+		}
+		if results == nil {
+			results = []severityRow{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": results})
+	}
+}
+
 func main() {
 	// Load .env from project root (works from src/api/ or WhiteChristmas/)
 	for _, path := range []string{".env", "../../.env"} {
@@ -1175,6 +1216,7 @@ func main() {
 	r.Get("/analytics/correlations", CorrelationsHandler())
 	r.Get("/analytics/arrest-rates", ArrestRatesHandler())
 	r.Get("/analytics/violence", ViolenceHandler())
+	r.Get("/analytics/severity", SeverityHandler())
 
 	// Create server
 	srv := &http.Server{
