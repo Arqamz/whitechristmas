@@ -790,31 +790,57 @@ function TimeSlider({
   onReplay,
   onLive,
   isReplay,
+  totalEvents,
 }: {
   onReplay: (offset: number, limit: number) => void;
   onLive: () => void;
   isReplay: boolean;
+  totalEvents: number;
 }) {
-  const [sliderValue, setSliderValue] = useState(0); // 0 = oldest, 100 = live
+  // Default to rightmost position (live). 0 = oldest end, 100 = live end.
+  const [sliderValue, setSliderValue] = useState(100);
+
+  const calcOffset = (v: number) => {
+    const maxOffset = Math.max(totalEvents - 50, 0);
+    return Math.round(((100 - v) / 100) * maxOffset);
+  };
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const v = Number(e.target.value);
     setSliderValue(v);
-    // Map 0-99 → offset from newest: slider at 0 shows events from oldest, 100 = live
-    const offset = Math.round((100 - v) * 4.9); // up to ~490 offset
-    onReplay(offset, 50);
+    if (v === 100) {
+      onLive();
+    } else {
+      onReplay(calcOffset(v), 50);
+    }
   };
+
+  const positionLabel = (() => {
+    if (sliderValue === 100) return 'LIVE';
+    if (totalEvents > 0) {
+      const offset = calcOffset(sliderValue);
+      return `${offset.toLocaleString()} events back`;
+    }
+    return `${100 - sliderValue}% back`;
+  })();
 
   return (
     <div
-      className="flex-none px-5 py-2 flex items-center gap-4 border-t"
+      className="flex-none px-5 py-2 flex items-center gap-3 border-t"
       style={{ borderColor: 'var(--border)', background: 'var(--bg-card)' }}
     >
       <span
         className="text-[10px] uppercase tracking-widest flex-none"
         style={{ color: 'var(--text-muted)' }}
       >
-        Time Replay
+        History
+      </span>
+
+      <span
+        className="text-[9px] flex-none"
+        style={{ color: 'var(--text-dim)' }}
+      >
+        oldest
       </span>
 
       <input
@@ -823,35 +849,38 @@ function TimeSlider({
         max={100}
         value={sliderValue}
         onChange={handleChange}
-        disabled={!isReplay && sliderValue === 100}
         className="flex-1"
         style={{ accentColor: 'var(--cyan)', cursor: 'pointer' }}
       />
 
-      <span
-        className="text-[10px] flex-none tabular-nums"
-        style={{ color: isReplay ? 'var(--yellow)' : 'var(--text-dim)' }}
-      >
-        {sliderValue === 100
-          ? 'LIVE'
-          : `T-${Math.round((100 - sliderValue) * 4.9)} events`}
+      <span className="text-[9px] flex-none" style={{ color: 'var(--cyan)' }}>
+        live
       </span>
 
-      <button
-        onClick={() => {
-          setSliderValue(100);
-          onLive();
-        }}
-        className="text-[10px] px-2 py-0.5 rounded border uppercase tracking-wider"
-        style={{
-          color: isReplay ? 'var(--cyan)' : 'var(--text-dim)',
-          borderColor: isReplay ? 'var(--cyan)' : 'var(--border)',
-          background: isReplay ? 'var(--cyan-dim)' : 'transparent',
-          cursor: 'pointer',
-        }}
+      <span
+        className="text-[10px] flex-none tabular-nums w-36 text-right"
+        style={{ color: isReplay ? 'var(--yellow)' : 'var(--text-dim)' }}
       >
-        ↩ Live
-      </button>
+        {positionLabel}
+      </span>
+
+      {isReplay && (
+        <button
+          onClick={() => {
+            setSliderValue(100);
+            onLive();
+          }}
+          className="text-[10px] px-2 py-0.5 rounded border uppercase tracking-wider flex-none"
+          style={{
+            color: 'var(--cyan)',
+            borderColor: 'var(--cyan)',
+            background: 'var(--cyan-dim)',
+            cursor: 'pointer',
+          }}
+        >
+          ↩ Live
+        </button>
+      )}
     </div>
   );
 }
@@ -1302,6 +1331,7 @@ export default function Home() {
         onReplay={handleReplay}
         onLive={handleLive}
         isReplay={isReplay}
+        totalEvents={stats.total_events}
       />
 
       {/* Charts — row 1: live streaming data */}
