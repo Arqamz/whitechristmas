@@ -221,6 +221,36 @@ services:
         condition: service_healthy
     restart: on-failure
 
+  # Spark batch analytics: reads CSV files → writes 9 aggregated tables to Postgres.
+  # Run once on demand: docker compose --profile batch run --rm batch-analytics
+  # Must complete before the analytics API endpoints return data.
+  batch-analytics:
+    build:
+      context: .
+      dockerfile: src/spark-jobs/Dockerfile
+    container_name: wc-batch-analytics
+    profiles: [batch]
+    entrypoint:
+      - java
+      - -Xmx4g
+      - -Xms1g
+      - -XX:+UseG1GC
+      - -Dlog4j.configurationFile=/app/log4j2.properties
+      - -cp
+      - /app/app.jar
+      - com.whitechristmas.spark.BatchAnalytics
+    environment:
+      POSTGRES_CONN_STRING: ${POSTGRES_CONN_STRING:-postgresql://whitechristmas:whitechristmas@postgres:5432/whitechristmas}
+      DATA_DIR: /data
+      KMEANS_K: "10"
+      MIN_CRIMES_FOR_RATE: "100"
+    volumes:
+      - ./data:/data:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   # Next.js dashboard: connects to api:8081 from the browser via exposed port
   frontend:
     build:

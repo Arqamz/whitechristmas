@@ -32,11 +32,12 @@ COPY src/schemas /schemas
 
 ENV AVRO_SCHEMA_PATH=/schemas/crime-event.avsc
 
-# StreamProcessor sets master("local[*]") internally; heap tuned for streaming
+# Default: combined pipeline entry point (StreamProcessor + BoltPipeline).
+# Override CMD or ENTRYPOINT to run a different main class, e.g. BatchAnalytics.
 ENTRYPOINT ["java", \
   "-Xmx4g", \
   "-Xms1g", \
   "-XX:+UseG1GC", \
   "-Dlog4j.configurationFile=/app/log4j2.properties", \
   "-cp", "/app/app.jar", \
-  "com.whitechristmas.spark.StreamProcessor"]
+  "com.whitechristmas.spark.Pipeline"]
