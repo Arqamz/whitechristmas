@@ -65,4 +65,4 @@ temp/
 notes/
 
 # Dataset
-data/
+data/.local/
