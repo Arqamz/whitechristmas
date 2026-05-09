@@ -110,7 +110,7 @@ export default function DistrictMap({ districts, hotspots = [] }: Props) {
 
     if (districts.length === 0) {
       // Show placeholder markers while no live data
-      Object.entries(DISTRICT_COORDS).forEach(([key, coords]) => {
+      Object.entries(DISTRICT_COORDS).forEach(([, coords]) => {
         L.circleMarker(coords, {
           radius: 6,
           color: '#1e2d3d',
