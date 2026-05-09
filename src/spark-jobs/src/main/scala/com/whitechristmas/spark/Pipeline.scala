@@ -37,6 +37,7 @@ object Pipeline {
       .appName("WhiteChristmas-Pipeline")
       .master("local[*]")
       .config("spark.sql.shuffle.partitions", "4")
+      .config("spark.sql.adaptive.enabled", "false")
       .getOrCreate()
 
     spark.sparkContext.setLogLevel("WARN")

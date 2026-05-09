@@ -178,7 +178,30 @@ curl -s http://localhost:8082/subjects
 
 ### Step 3 — PostgreSQL + MongoDB
 
-Start both databases (or use the Docker services for just the DBs):
+Two options for database backends — pick one and use those env vars in all subsequent steps.
+
+#### Option 3A — Hosted (alwaysdata + MongoDB Atlas, no local install needed)
+
+Uses the credentials in `.env` at the repo root. The services load it automatically, but you can also export manually:
+
+```bash
+export POSTGRES_CONN_STRING='postgresql://i221170:3r;Ez=q;2&G-,5@postgresql-i221170.alwaysdata.net:5432/i221170_whitechristmas'
+export MONGODB_CONN_STRING='mongodb+srv://admin:zxZfBY3HfsOpdm4Q@whitechristmas.wxq696o.mongodb.net/?appName=whitechristmas'
+```
+
+No local process to start — both databases are always running.
+
+**Verify:**
+
+```bash
+# PostgreSQL
+psql "$POSTGRES_CONN_STRING" -c "SELECT 1"
+
+# MongoDB (requires mongosh)
+mongosh "$MONGODB_CONN_STRING" --eval "db.runCommand({ping:1})"
+```
+
+#### Option 3B — Local (Docker or native)
 
 ```bash
 # Docker only for DBs, native for everything else
@@ -190,6 +213,11 @@ Or if you have them installed natively:
 ```bash
 pg_ctl start -D ~/.local/share/postgresql/data
 mongod --dbpath ~/.local/share/mongodb/data --fork --logpath /tmp/mongod.log
+```
+
+```bash
+export POSTGRES_CONN_STRING='postgresql://whitechristmas:whitechristmas@localhost:5432/whitechristmas'
+export MONGODB_CONN_STRING='mongodb://whitechristmas:whitechristmas@localhost:27017/whitechristmas?authSource=admin'
 ```
 
 ---
@@ -204,11 +232,12 @@ cd /home/arqam/WhiteChristmas/src/api
 # Build (skip if binary is current)
 go build -o api .
 
-# Run — ALERTS_TOPICS is comma-separated, one goroutine per topic
+# Run — uses $POSTGRES_CONN_STRING and $MONGODB_CONN_STRING from Step 3
+# (export those vars first, or inline them here)
 KAFKA_BROKERS=localhost:9092 \
 ALERTS_TOPICS=alerts-crimes,alerts-violence,alerts-arrests,alerts-sex-offenders \
-POSTGRES_CONN_STRING=postgresql://whitechristmas:whitechristmas@localhost:5432/whitechristmas \
-MONGODB_CONN_STRING=mongodb://whitechristmas:whitechristmas@localhost:27017/whitechristmas?authSource=admin \
+POSTGRES_CONN_STRING="$POSTGRES_CONN_STRING" \
+MONGODB_CONN_STRING="$MONGODB_CONN_STRING" \
 API_PORT=8081 \
   ./api
 ```
@@ -259,11 +288,12 @@ Open **http://localhost:3000**.
 ```bash
 cd /home/arqam/WhiteChristmas/src/spark-jobs
 
+# Uses $POSTGRES_CONN_STRING and $MONGODB_CONN_STRING from Step 3
 KAFKA_BROKERS=localhost:9092 \
 STREAM_INPUT_PATTERN=raw-events-.* \
 ANOMALY_TOPIC=anomaly-alerts \
-POSTGRES_CONN_STRING=postgresql://whitechristmas:whitechristmas@localhost:5432/whitechristmas \
-MONGODB_CONN_STRING=mongodb://whitechristmas:whitechristmas@localhost:27017/whitechristmas?authSource=admin \
+POSTGRES_CONN_STRING="$POSTGRES_CONN_STRING" \
+MONGODB_CONN_STRING="$MONGODB_CONN_STRING" \
 AVRO_SCHEMA_PATH=../schemas/crime-event.avsc \
   sbt "runMain com.whitechristmas.spark.StreamProcessor"
 ```
@@ -293,14 +323,15 @@ Expected startup:
 ```bash
 cd /home/arqam/WhiteChristmas/src/spark-jobs
 
+# Uses $POSTGRES_CONN_STRING and $MONGODB_CONN_STRING from Step 3
 KAFKA_BROKERS=localhost:9092 \
 BOLT_INPUT_PATTERN=raw-events-.* \
 ANOMALY_THRESHOLD=50 \
 WINDOW_DURATION_MINUTES=5 \
 SLIDE_INTERVAL_MINUTES=1 \
 WATERMARK_MINUTES=10 \
-POSTGRES_CONN_STRING=postgresql://whitechristmas:whitechristmas@localhost:5432/whitechristmas \
-MONGODB_CONN_STRING=mongodb://whitechristmas:whitechristmas@localhost:27017/whitechristmas?authSource=admin \
+POSTGRES_CONN_STRING="$POSTGRES_CONN_STRING" \
+MONGODB_CONN_STRING="$MONGODB_CONN_STRING" \
 AVRO_SCHEMA_PATH=../schemas/crime-event.avsc \
   sbt "runMain com.whitechristmas.spark.BoltPipeline"
 ```
@@ -559,7 +590,8 @@ Reads CSV files directly and writes aggregated results to PostgreSQL. No Kafka i
 cd /home/arqam/WhiteChristmas/src/spark-jobs
 
 # sbt (recommended for dev)
-POSTGRES_CONN_STRING=postgresql://whitechristmas:whitechristmas@localhost:5432/whitechristmas \
+# Uses $POSTGRES_CONN_STRING from Step 3 (MongoDB not used by batch job)
+POSTGRES_CONN_STRING="$POSTGRES_CONN_STRING" \
 DATA_DIR=../../data \
 KMEANS_K=10 \
 MIN_CRIMES_FOR_RATE=100 \
