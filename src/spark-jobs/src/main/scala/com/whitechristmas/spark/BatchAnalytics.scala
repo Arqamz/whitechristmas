@@ -95,6 +95,9 @@ object BatchAnalytics {
       .master("local[*]")
       .config("spark.sql.shuffle.partitions", "8")
       .config("spark.driver.memory", "4g")
+      // Java serializer avoids Kryo's reflection-based class registration which
+      // fails on Java 21 due to strong module encapsulation (java.nio, java.lang.invoke, etc.)
+      .config("spark.serializer", "org.apache.spark.serializer.JavaSerializer")
       .getOrCreate()
 
     spark.sparkContext.setLogLevel("WARN")
@@ -386,6 +389,10 @@ object BatchAnalytics {
       .setMaxIter(30)
       .setFeaturesCol("features")
       .setPredictionCol("cluster_id")
+      // "random" init avoids initKMeansParallel (k-means||) which triggers
+      // an RDD countByValue shuffle — the shuffle hits Kryo, which fails on
+      // Java 21 due to strong module encapsulation on java.lang.invoke etc.
+      .setInitMode("random")
       .fit(geoVectors)
 
     val predictions = kmeansModel.transform(geoVectors)

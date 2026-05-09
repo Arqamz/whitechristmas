@@ -20,14 +20,6 @@ resolvers ++= Seq(
   "Confluent" at "https://packages.confluent.io/maven/"
 )
 
-// Java 21 strong encapsulation blocks Kryo from reflecting into java.nio internals
-// (HeapByteBuffer) during Spark shuffle / MLlib K-Means initKMeansParallel.
-// These opens are required for Spark 4 + Kryo + Java 21+.
-run / javaOptions ++= Seq(
-  "--add-opens=java.base/java.nio=ALL-UNNAMED",
-  "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED"
-)
-
 // Auto-load ../../.env into JVM system properties so sys.env picks them up at runtime
 run / javaOptions ++= {
   val envFile = new java.io.File("../../.env")
