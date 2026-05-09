@@ -710,7 +710,7 @@ async fn stream_json_crimes(
         match producer.send(rec, Duration::from_secs(5)).await {
             Ok(_) => {
                 published += 1;
-                if published <= 5 || published % 500 == 0 {
+                if published <= 5 || published.is_multiple_of(500) {
                     info!("[JSON] #{published}  case={case_number}  type={primary_type}  district={district}");
                 }
             }

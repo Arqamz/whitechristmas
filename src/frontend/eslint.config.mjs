@@ -8,11 +8,12 @@ export default [
     ignores: ["node_modules/**", ".next/**", "dist/**", "build/**"],
   },
   ...tsPlugin.configs["flat/recommended"],
-  reactPlugin.configs.flat.recommended,
-  reactPlugin.configs.flat["jsx-runtime"],
   reactHooksPlugin.configs["recommended-latest"],
   {
     files: ["**/*.{ts,tsx,js,jsx}"],
+    plugins: {
+      react: reactPlugin,
+    },
     languageOptions: {
       parser: tsParser,
       parserOptions: {
