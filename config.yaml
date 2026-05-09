@@ -1,8 +1,23 @@
 kafka:
   brokers: "localhost:9092"
-  crime_topic: "crime-events"        # JSON crime simulator publishes here
-  alerts_topic: "alerts"             # existing Avro pipeline alert topic
-  publication_rate: 10               # events per second (crime simulator)
+  publication_rate: 40               # total events per second across all datasets (10/dataset)
+
+  # Per-dataset ingestion topics (Avro, Confluent wire format)
+  raw_topics:
+    crimes:       "raw-events-crimes"
+    violence:     "raw-events-violence"
+    arrests:      "raw-events-arrests"
+    sex_offenders: "raw-events-sex-offenders"
+
+  # Per-dataset alert topics (JSON, published by Spark StreamProcessor + BoltPipeline)
+  alert_topics:
+    crimes:       "alerts-crimes"
+    violence:     "alerts-violence"
+    arrests:      "alerts-arrests"
+    sex_offenders: "alerts-sex-offenders"
+
+  # Statistical anomaly alerts from StreamProcessor z-score detection
+  anomaly_topic: "anomaly-alerts"
 
 pipeline:
   window_duration_minutes: 5         # Window Bolt: sliding window size

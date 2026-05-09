@@ -1,31 +1,31 @@
 package com.whitechristmas.spark
 
 import org.apache.spark.sql._
+import org.apache.spark.sql.avro.functions.from_avro
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.streaming.Trigger
 import org.apache.spark.sql.types._
 import org.bson.Document
 import com.mongodb.client.MongoClients
 import scala.jdk.CollectionConverters._
+import scala.io.Source
 
 /** WhiteChristmas Bolt Pipeline — Storm-inspired Spark Structured Streaming.
   *
-  * Reads JSON crime events from the `crime-events` Kafka topic (published by
-  * the Rust producer in --json-mode) and implements a Storm bolt topology:
+  * Reads Avro CrimeEvents from all raw-events-* topics and implements a
+  * sliding-window volume anomaly detector grouped by source_dataset + district:
   *
-  * Kafka (crime-events JSON) └─► Parse Bolt validates required fields;
-  * malformed → logged + discarded └─► District Bolt tags tuples with police
-  * district + event timestamp └─► Window Bolt sliding count window per district
-  * └─► Anomaly Bolt emits when window count exceeds threshold └─► Alert Bolt
-  * persists to PostgreSQL (alerts) + MongoDB (alert_logs)
+  * raw-events-crimes ┐ raw-events-violence ├─► Parse Bolt → District Bolt →
+  * Window Bolt raw-events-arrests │ → Anomaly Bolt (threshold breach)
+  * raw-events-sex-offenders ┘ → Alert Bolt → PostgreSQL alerts → MongoDB
+  * alert_logs → Kafka anomaly-alerts
   *
-  * Run: sbt "runMain com.whitechristmas.spark.BoltPipeline"
+  * Complementary to StreamProcessor, NOT redundant: StreamProcessor — per-event
+  * routing (severity >= 3) → alerts-{dataset} BoltPipeline — sustained volume
+  * surges → anomaly-alerts
   *
-  * Environment variables (all have sensible defaults): KAFKA_BROKERS (default:
-  * localhost:9092) CRIME_TOPIC (default: crime-events) WINDOW_DURATION_MINUTES
-  * (default: 5) SLIDE_INTERVAL_MINUTES (default: 1) ANOMALY_THRESHOLD (default:
-  * 50) WATERMARK_MINUTES (default: 10) POSTGRES_CONN_STRING
-  * postgresql://user:pass@host:port/db MONGODB_CONN_STRING mongodb+srv://...
+  * Called standalone via main(), or as part of the combined Pipeline entry
+  * point via setup() which registers all streams without blocking.
   */
 object BoltPipeline {
 
@@ -41,29 +41,22 @@ object BoltPipeline {
     (s"jdbc:postgresql://$hostDb", up.substring(0, ci), up.substring(ci + 1))
   }
 
-  /** JSON schema for events published by the Rust producer in --json-mode. */
-  private val crimeSchema: StructType = StructType(
-    Array(
-      StructField("case_number", StringType, nullable = true),
-      StructField("date", StringType, nullable = true),
-      StructField("block", StringType, nullable = true),
-      StructField("primary_type", StringType, nullable = true),
-      StructField("district", StringType, nullable = true),
-      StructField("arrest", StringType, nullable = true),
-      StructField("latitude", StringType, nullable = true),
-      StructField("longitude", StringType, nullable = true)
-    )
-  )
-
-  def main(args: Array[String]): Unit = {
+  /** Register all BoltPipeline streaming queries against the given session.
+    * Does NOT call awaitAnyTermination — callers are responsible for that. Safe
+    * to call when a SparkSession already exists (getOrCreate is a no-op).
+    */
+  def setup(spark: SparkSession): Unit = {
 
     val kafkaBrokers = getConfig("KAFKA_BROKERS", "localhost:9092")
-    val crimeTopic = getConfig("CRIME_TOPIC", "crime-events")
+    val inputTopicPattern = getConfig("BOLT_INPUT_PATTERN", "raw-events-.*")
+    val anomalyTopic = getConfig("ANOMALY_TOPIC", "anomaly-alerts")
     val windowDuration = getConfig("WINDOW_DURATION_MINUTES", "5") + " minutes"
     val slideInterval = getConfig("SLIDE_INTERVAL_MINUTES", "1") + " minutes"
     val threshold = getConfig("ANOMALY_THRESHOLD", "50").toInt
     val watermark = getConfig("WATERMARK_MINUTES", "10") + " minutes"
     val checkpointDir = "/tmp/spark-checkpoint/bolt-pipeline"
+    val schemaPath =
+      getConfig("AVRO_SCHEMA_PATH", "../schemas/crime-event.avsc")
 
     val pgConnStr = getConfig("POSTGRES_CONN_STRING")
     val mongoConnStr = getConfig("MONGODB_CONN_STRING")
@@ -71,92 +64,104 @@ object BoltPipeline {
     val mongoEnabled = mongoConnStr.nonEmpty
 
     val (pgJdbcUrl, pgUser, pgPass) =
-      if (pgEnabled) parsePostgresUrl(pgConnStr)
-      else ("", "", "")
-
-    val spark = SparkSession
-      .builder()
-      .appName("WhiteChristmas-BoltPipeline")
-      .master("local[*]")
-      .config("spark.sql.shuffle.partitions", "4")
-      .getOrCreate()
-
-    spark.sparkContext.setLogLevel("WARN")
+      if (pgEnabled) parsePostgresUrl(pgConnStr) else ("", "", "")
 
     println("╔══════════════════════════════════════════════════════════╗")
-    println("║  WhiteChristmas Bolt Pipeline                           ║")
-    println("║  Parse → District → Window → Anomaly → Alert           ║")
+    println("║  ⚡ BoltPipeline — volume-threshold anomaly detector    ║")
     println("╚══════════════════════════════════════════════════════════╝")
-    println(s"  Kafka    : $kafkaBrokers  topic=$crimeTopic")
+    println(s"  Pattern  : $inputTopicPattern")
     println(s"  Window   : $windowDuration, slide=$slideInterval")
-    println(s"  Threshold: $threshold crimes/window")
-    println(s"  PostgreSQL: ${if (pgEnabled) "enabled" else "DISABLED"}")
-    println(s"  MongoDB  : ${if (mongoEnabled) "enabled" else "DISABLED"}")
+    println(s"  Threshold: $threshold events/window per dataset+district")
+    println(
+      s"  Output   : PostgreSQL alerts + MongoDB alert_logs + $anomalyTopic"
+    )
     println()
 
-    // ── Kafka source ──────────────────────────────────────────────────────
+    val avroSchemaStr = Source.fromFile(schemaPath).mkString
+    println("✓ Avro schema loaded (BoltPipeline)")
+
+    val stripConfluentHeader = udf((bytes: Array[Byte]) =>
+      if (bytes != null && bytes.length > 5) bytes.slice(5, bytes.length)
+      else bytes
+    )
+
+    // ── Kafka source ──────────────────────────────────────────────────────────
     val raw = spark.readStream
       .format("kafka")
       .option("kafka.bootstrap.servers", kafkaBrokers)
-      .option("subscribe", crimeTopic)
+      .option("subscribePattern", inputTopicPattern)
       .option("startingOffsets", "latest")
       .option("failOnDataLoss", "false")
+      .option(
+        "kafka.group.id",
+        "whitechristmas-bolt-pipeline"
+      ) // distinct from StreamProcessor
       .load()
 
-    // ════════════════════════════════════════════════════════════════════════
-    // Parse Bolt
-    // Deserialise JSON value from Kafka. Tuples missing required fields
-    // are logged to the malformed-events console sink and discarded; they
-    // are NOT forwarded to the District Bolt.
-    // ════════════════════════════════════════════════════════════════════════
+    // ── Parse Bolt ────────────────────────────────────────────────────────────
     val parsedRaw = raw
       .select(
         col("timestamp").as("kafka_ts"),
-        from_json(col("value").cast("string"), crimeSchema).as("d")
+        stripConfluentHeader(col("value")).as("avro_payload")
       )
-      .select(col("kafka_ts"), col("d.*"))
+      .select(
+        col("kafka_ts"),
+        from_avro(col("avro_payload"), avroSchemaStr).as("event")
+      )
+      .select(
+        col("kafka_ts"),
+        col("event.event_id"),
+        col("event.source_dataset"),
+        col("event.victim_id"),
+        col("event.incident_date"),
+        col("event.incident_time"),
+        col("event.location"),
+        col("event.district"),
+        col("event.beat"),
+        col("event.crime_type"),
+        col("event.injury_type"),
+        col("event.severity"),
+        col("event.latitude"),
+        col("event.longitude"),
+        col("event.is_arrest"),
+        col("event.processed_timestamp")
+      )
 
     val requiredPresent =
-      col("case_number").isNotNull && col("case_number") =!= "" &&
-        col("date").isNotNull && col("date") =!= "" &&
-        col("primary_type").isNotNull && col("primary_type") =!= "" &&
+      col("incident_date").isNotNull && col("incident_date") =!= "" &&
         col("district").isNotNull && col("district") =!= ""
 
     val validEvents = parsedRaw.filter(requiredPresent)
     val malformedEvents = parsedRaw.filter(!requiredPresent)
 
-    // Log malformed tuples to console — do not forward downstream
-    val malformedQuery = malformedEvents.writeStream
+    malformedEvents.writeStream
       .outputMode("append")
       .format("console")
       .option("truncate", "false")
-      .queryName("parse-bolt-malformed-logger")
+      .queryName("bolt-parse-malformed")
       .start()
 
-    // ════════════════════════════════════════════════════════════════════════
-    // District Bolt
-    // Tags each valid tuple with its police district and parses the event
-    // timestamp for downstream time-based windowing.
-    // ════════════════════════════════════════════════════════════════════════
+    // ── District Bolt ─────────────────────────────────────────────────────────
     val districtTagged = validEvents
       .withColumn(
         "event_time",
         coalesce(
-          to_timestamp(col("date"), "MM/dd/yyyy hh:mm:ss a"),
-          col("kafka_ts") // fallback to Kafka ingestion time
+          to_timestamp(
+            concat(col("incident_date"), lit(" "), col("incident_time")),
+            "MM/dd/yyyy HH:mm:ss"
+          ),
+          to_timestamp(col("incident_date"), "MM/dd/yyyy"),
+          col("kafka_ts").cast("timestamp")
         )
       )
       .withWatermark("event_time", watermark)
 
-    // ════════════════════════════════════════════════════════════════════════
-    // Window Bolt  (Sliding Window)
-    // Groups district-tagged tuples into overlapping time windows and emits
-    // per-district crime counts at each slide interval.
-    // ════════════════════════════════════════════════════════════════════════
+    // ── Window Bolt — per source_dataset + district ───────────────────────────
     val windowedCounts = districtTagged
       .groupBy(
         window(col("event_time"), windowDuration, slideInterval)
           .as("time_window"),
+        col("source_dataset"),
         col("district")
       )
       .agg(
@@ -165,6 +170,7 @@ object BoltPipeline {
         last("kafka_ts").as("window_last_event")
       )
       .select(
+        col("source_dataset"),
         col("district"),
         col("time_window.start").as("window_start"),
         col("time_window.end").as("window_end"),
@@ -173,12 +179,7 @@ object BoltPipeline {
         col("window_last_event")
       )
 
-    // ════════════════════════════════════════════════════════════════════════
-    // Anomaly Bolt
-    // Compares each district's window count against the configurable threshold.
-    // Emits an anomaly tuple — including district ID, window count, threshold,
-    // and timestamp — when the count is exceeded.
-    // ════════════════════════════════════════════════════════════════════════
+    // ── Anomaly Bolt ──────────────────────────────────────────────────────────
     val anomalies = windowedCounts
       .filter(col("event_count") > threshold)
       .withColumn("threshold", lit(threshold))
@@ -190,24 +191,21 @@ object BoltPipeline {
           .otherwise("MEDIUM")
       )
 
-    // ════════════════════════════════════════════════════════════════════════
-    // Alert Bolt
-    // Consumes anomaly tuples and persists structured alert records to:
-    //   PostgreSQL → alerts table
-    //   MongoDB    → whitechristmas.alert_logs collection
-    // Each record includes: district, window_start/end, event_count,
-    // threshold, detected_at, alert_severity.
-    // ════════════════════════════════════════════════════════════════════════
-    val alertQuery = anomalies.writeStream
+    // ── Alert Bolt ────────────────────────────────────────────────────────────
+    // Writes to PostgreSQL alerts + MongoDB alert_logs + anomaly-alerts topic.
+    // Does NOT write to alerts-{dataset} — those are reserved for StreamProcessor's
+    // per-event CrimeEvent JSON. Volume anomalies go to anomaly-alerts.
+    anomalies.writeStream
       .outputMode("update")
       .foreachBatch { (batchDF: DataFrame, batchId: Long) =>
         if (!batchDF.isEmpty) {
           batchDF.cache()
-          val count = batchDF.count()
-          println(s"\n[Alert Bolt] Batch $batchId — $count anomalies detected")
+          val cnt = batchDF.count()
+          println(
+            s"\n[Alert Bolt Batch $batchId] $cnt volume anomalies detected"
+          )
           batchDF.show(5, truncate = false)
 
-          // ── PostgreSQL sink ─────────────────────────────────────────────
           if (pgEnabled) {
             try {
               batchDF.write
@@ -220,14 +218,13 @@ object BoltPipeline {
                 .option("password", pgPass)
                 .option("stringtype", "unspecified")
                 .save()
-              println(s"  ✓ PostgreSQL: wrote $count alert records")
+              println(s"  ✓ PostgreSQL alerts: $cnt rows")
             } catch {
               case e: Exception =>
                 println(s"  ✗ PostgreSQL write failed: ${e.getMessage}")
             }
           }
 
-          // ── MongoDB sink ────────────────────────────────────────────────
           if (mongoEnabled) {
             try {
               val docs = batchDF.toJSON.collect().map(Document.parse)
@@ -237,36 +234,75 @@ object BoltPipeline {
                   .getDatabase("whitechristmas")
                   .getCollection("alert_logs")
                   .insertMany(docs.toList.asJava)
-                println(s"  ✓ MongoDB: wrote $count alert_logs documents")
-              } finally {
-                client.close()
-              }
+                println(s"  ✓ MongoDB alert_logs: $cnt docs")
+              } finally { client.close() }
             } catch {
               case e: Exception =>
                 println(s"  ✗ MongoDB write failed: ${e.getMessage}")
             }
           }
 
+          // Volume anomaly alerts → anomaly-alerts topic (NOT alerts-{dataset}).
+          // Schema: { alert_type, source_dataset, district, window_start, window_end,
+          //           event_count, threshold, detected_at, alert_severity }
+          try {
+            batchDF
+              .select(
+                col("district").as("key"),
+                to_json(
+                  struct(
+                    lit("volume_threshold").as("alert_type"),
+                    col("source_dataset"),
+                    col("district"),
+                    col("window_start"),
+                    col("window_end"),
+                    col("event_count"),
+                    col("threshold"),
+                    col("detected_at"),
+                    col("alert_severity")
+                  )
+                ).as("value")
+              )
+              .write
+              .format("kafka")
+              .option("kafka.bootstrap.servers", kafkaBrokers)
+              .option("topic", anomalyTopic)
+              .save()
+            println(s"  ✓ Kafka $anomalyTopic: $cnt volume anomalies published")
+          } catch {
+            case e: Exception =>
+              println(s"  ✗ Kafka write failed: ${e.getMessage}")
+          }
+
           batchDF.unpersist()
         }
+        ()
       }
       .option("checkpointLocation", s"$checkpointDir/alert-bolt")
       .trigger(Trigger.ProcessingTime("30 seconds"))
-      .queryName("alert-bolt")
+      .queryName("bolt-alert")
       .start()
 
-    println("All bolts active — awaiting crime events on topic: " + crimeTopic)
     println()
-    println("  Parse Bolt    — JSON deserialise + required-field validation")
-    println("  District Bolt — tag by police district, parse event timestamp")
+    println("  BoltPipeline streams active:")
     println(
-      s"  Window Bolt   — $windowDuration sliding window, $slideInterval slide"
+      s"    window  → $windowDuration sliding, $slideInterval slide, per dataset+district"
     )
-    println(s"  Anomaly Bolt  — threshold = $threshold crimes / window")
-    println("  Alert Bolt    — PostgreSQL alerts + MongoDB alert_logs")
+    println(s"    anomaly → threshold=$threshold events/window → $anomalyTopic")
     println()
-    println("Press Ctrl+C to stop")
+  }
 
+  def main(args: Array[String]): Unit = {
+    val spark = SparkSession
+      .builder()
+      .appName("WhiteChristmas-BoltPipeline")
+      .master("local[*]")
+      .config("spark.sql.shuffle.partitions", "4")
+      .getOrCreate()
+
+    spark.sparkContext.setLogLevel("WARN")
+
+    setup(spark)
     spark.streams.awaitAnyTermination()
   }
 }

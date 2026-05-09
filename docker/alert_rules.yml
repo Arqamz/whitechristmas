@@ -1,0 +1,84 @@
+groups:
+  - name: whitechristmas
+    interval: 15s
+    rules:
+
+      # ── Availability ────────────────────────────────────────────────────────
+
+      - alert: APIDown
+        expr: up{job="whitechristmas-api"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "WhiteChristmas API is down"
+          description: "Prometheus cannot scrape the API at api:8081/metrics. Check the wc-api container."
+
+      # ── Event flow ──────────────────────────────────────────────────────────
+
+      - alert: NoEventsIngested
+        expr: sum(rate(whitechristmas_events_total[2m])) == 0
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No events have been ingested for 3 minutes"
+          description: "whitechristmas_events_total rate is zero. Check the Kafka producer (wc-producer) and Spark streaming job (wc-spark-streaming)."
+
+      - alert: LowEventRate
+        expr: sum(rate(whitechristmas_events_total[5m])) < 0.5
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "Event ingestion rate is unusually low"
+          description: "Less than 0.5 events/sec averaged over 5 minutes. Producer may be throttled or finished a loop."
+
+      # ── Error rates ─────────────────────────────────────────────────────────
+
+      - alert: HighBroadcastErrors
+        expr: rate(whitechristmas_broadcast_errors_total[1m]) > 0.1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated WebSocket broadcast error rate"
+          description: "More than 0.1 broadcast errors per second. Clients may be disconnecting abnormally."
+
+      - alert: HighHTTP5xx
+        expr: >
+          sum(rate(whitechristmas_http_request_duration_seconds_count{status=~"5.."}[1m]))
+          /
+          sum(rate(whitechristmas_http_request_duration_seconds_count[1m])) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "HTTP 5xx error rate above 5%"
+          description: "More than 5% of API requests are returning 5xx status codes."
+
+      # ── Latency ─────────────────────────────────────────────────────────────
+
+      - alert: HighAPILatency
+        expr: >
+          histogram_quantile(0.99,
+            sum by(le) (rate(whitechristmas_http_request_duration_seconds_bucket[5m]))
+          ) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "API P99 latency above 2 seconds"
+          description: "The 99th-percentile HTTP response time has exceeded 2 s for 5 minutes."
+
+      # ── Dataset-level anomalies ─────────────────────────────────────────────
+
+      - alert: DatasetIngestStopped
+        expr: >
+          sum by(dataset) (rate(whitechristmas_events_total[5m])) == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dataset {{ $labels.dataset }} has stopped ingesting"
+          description: "No events from the '{{ $labels.dataset }}' dataset for 5 minutes."

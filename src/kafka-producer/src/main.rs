@@ -6,6 +6,7 @@ use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use serde::Deserialize;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
@@ -28,17 +29,28 @@ struct KafkaYamlConfig {
 // ── CLI args ───────────────────────────────────────────────────────────────
 
 /// WhiteChristmas Kafka producer — all five Chicago public safety datasets → Avro → Kafka
+///
+/// Default (production) behaviour with no flags:
+///   Reads all CSVs from ../../data, spawns one parallel tokio task per dataset,
+///   each looping its CSV forever and routing to its own raw-events-{dataset} topic.
+///
+///   cargo run --release                                   # all defaults
+///   cargo run --release -- --events-per-sec 20           # 20 events/sec per dataset
+///   cargo run --release -- --max-per-dataset 500         # stop each after 500 events
+///   cargo run --release -- --csv-path ../../data/foo.csv # single file
 #[derive(Parser, Debug)]
 #[command(name = "WhiteChristmas Producer")]
 #[command(
-    about = "Stream all five Chicago public safety datasets to Kafka with Avro serialization"
+    about = "Stream all Chicago public safety datasets in parallel to per-dataset Kafka topics"
 )]
 struct Args {
-    /// Path to a single CSV file (auto-detects dataset type from filename)
+    /// Path to a single CSV file (auto-detects dataset type from filename).
+    /// Overrides the default --csv-dir.
     #[arg(long, conflicts_with = "csv_dir")]
     csv_path: Option<PathBuf>,
 
-    /// Directory containing Chicago CSV files (streams all recognised datasets)
+    /// Directory containing Chicago CSV files (default: ../../data).
+    /// All recognised datasets are streamed in parallel.
     #[arg(long, conflicts_with = "csv_path")]
     csv_dir: Option<PathBuf>,
 
@@ -46,33 +58,43 @@ struct Args {
     #[arg(long, default_value = "localhost:9092")]
     kafka_brokers: String,
 
-    /// Kafka topic
-    #[arg(long, default_value = "raw-events")]
+    /// Fallback topic used only when --per-dataset-topics=false
+    #[arg(long, default_value = "raw-events", hide = true)]
     topic: String,
 
     /// Schema Registry URL
-    #[arg(long, default_value = "http://localhost:8081")]
+    #[arg(long, default_value = "http://localhost:8082")]
     schema_registry: String,
 
-    /// Events per second (across all datasets combined)
+    /// Events per second per dataset (default: 10 → ~40 total across 4 parallel datasets)
     #[arg(long, default_value = "10")]
     events_per_sec: u32,
 
-    /// Maximum events per dataset (0 = unlimited)
+    /// Stop each dataset task after this many events per cycle (0 = unlimited)
     #[arg(long, default_value = "0")]
     max_per_dataset: usize,
 
-    /// Maximum total events across all datasets (0 = unlimited)
+    /// Stop after this many total events across all datasets — sequential mode only (0 = unlimited)
     #[arg(long, default_value = "0")]
     max_events: usize,
 
-    /// Path to config.yaml — used in --json-mode for topic and rate defaults
-    #[arg(long)]
+    /// Path to config.yaml (legacy; used only in --json-mode)
+    #[arg(long, hide = true)]
     config: Option<PathBuf>,
 
-    /// Stream Crime CSV as JSON to crime-events topic (no Avro, no Schema Registry)
-    #[arg(long, default_value = "false")]
+    /// [DEBUG] Stream Crimes CSV as plain JSON — legacy path, not for production
+    #[arg(long, default_value = "false", hide = true)]
     json_mode: bool,
+
+    /// Parallel infinite mode: each dataset loops in its own tokio task (default: true).
+    /// Pass --loop-forever=false to run all datasets sequentially once and exit.
+    #[arg(long, default_value = "true")]
+    loop_forever: bool,
+
+    /// Route each dataset to raw-events-{dataset} topic (default: true).
+    /// Pass --per-dataset-topics=false to send everything to --topic.
+    #[arg(long, default_value = "true")]
+    per_dataset_topics: bool,
 
     /// Verbose logging
     #[arg(short, long)]
@@ -115,12 +137,24 @@ impl DatasetType {
 
     fn label(&self) -> &'static str {
         match self {
-            DatasetType::ViolenceReduction => "violence_reduction",
+            DatasetType::ViolenceReduction => "violence",
             DatasetType::Crimes => "crimes",
             DatasetType::Arrests => "arrests",
-            DatasetType::SexOffenders => "sex_offenders",
-            DatasetType::PoliceStations => "police_stations",
+            DatasetType::SexOffenders => "sex-offenders",
+            DatasetType::PoliceStations => "police-stations",
             DatasetType::Unknown => "unknown",
+        }
+    }
+
+    /// Kafka topic name used when --per-dataset-topics is set.
+    fn topic(&self) -> &'static str {
+        match self {
+            DatasetType::ViolenceReduction => "raw-events-violence",
+            DatasetType::Crimes => "raw-events-crimes",
+            DatasetType::Arrests => "raw-events-arrests",
+            DatasetType::SexOffenders => "raw-events-sex-offenders",
+            DatasetType::PoliceStations => "raw-events-police-stations",
+            DatasetType::Unknown => "raw-events-unknown",
         }
     }
 }
@@ -332,7 +366,7 @@ impl From<ViolenceRow> for UnifiedEvent {
             .clone()
             .or_else(|| r.incident_primary.clone());
         UnifiedEvent {
-            source_dataset: "violence_reduction".into(),
+            source_dataset: "violence".into(),
             victim_id: r.case_number,
             incident_date: date,
             incident_time: time,
@@ -420,7 +454,7 @@ impl From<SexOffenderRow> for UnifiedEvent {
             _ => None,
         };
         UnifiedEvent {
-            source_dataset: "sex_offenders".into(),
+            source_dataset: "sex-offenders".into(),
             victim_id,
             incident_date: r.birth_date.unwrap_or_else(|| "unknown".into()),
             incident_time: None,
@@ -558,7 +592,7 @@ fn to_avro_record(event: UnifiedEvent, schema: &Schema, schema_id: u32) -> Resul
 async fn stream_csv(
     path: &PathBuf,
     dataset_type: &DatasetType,
-    schema: &Schema,
+    schema: Arc<Schema>,
     schema_id: u32,
     producer: &FutureProducer,
     topic: &str,
@@ -590,7 +624,7 @@ async fn stream_csv(
                     }
                 };
                 let event: UnifiedEvent = $convert(row);
-                let payload = match to_avro_record(event, schema, schema_id) {
+                let payload = match to_avro_record(event, &schema, schema_id) {
                     Ok(p) => p,
                     Err(e) => {
                         warn!("Avro encode failed row {}: {}", read, e);
@@ -811,14 +845,26 @@ async fn main() -> Result<()> {
     }
 
     info!("╔══════════════════════════════════════════════════════════╗");
-    info!("║  🦀 WhiteChristmas Kafka Producer — All Five Datasets  ║");
+    info!("║  🦀 WhiteChristmas Kafka Producer — All Datasets       ║");
     info!("╚══════════════════════════════════════════════════════════╝");
 
+    // Resolve data source: explicit --csv-dir / --csv-path, or fall back to ../../data.
+    let effective_csv_dir: Option<PathBuf> = args.csv_dir.clone().or_else(|| {
+        if args.csv_path.is_none() {
+            Some(PathBuf::from("../../data"))
+        } else {
+            None
+        }
+    });
+
     // Collect CSV paths to process
-    let csv_files: Vec<PathBuf> = if let Some(dir) = &args.csv_dir {
+    let csv_files: Vec<PathBuf> = if let Some(dir) = &effective_csv_dir {
         if !dir.is_dir() {
-            error!("--csv-dir is not a directory: {}", dir.display());
-            anyhow::bail!("Not a directory");
+            error!(
+                "Data directory not found: {} — pass --csv-dir or --csv-path",
+                dir.display()
+            );
+            anyhow::bail!("Data directory not found");
         }
         let mut files: Vec<PathBuf> = std::fs::read_dir(dir)?
             .filter_map(|e| e.ok())
@@ -837,27 +883,44 @@ async fn main() -> Result<()> {
     } else if let Some(path) = &args.csv_path {
         vec![path.clone()]
     } else {
-        error!("Provide either --csv-path or --csv-dir");
-        anyhow::bail!("No input specified");
+        unreachable!("effective_csv_dir covers the no-input case")
     };
 
     if csv_files.is_empty() {
-        error!("No recognised CSV files found");
+        error!("No recognised CSV files found — check your data directory");
         anyhow::bail!("Empty dataset list");
     }
 
-    info!("Datasets to stream ({}):", csv_files.len());
+    info!("Datasets ({}):", csv_files.len());
     for p in &csv_files {
+        let dt = DatasetType::from_filename(p);
+        let dest = if args.per_dataset_topics {
+            dt.topic()
+        } else {
+            &args.topic
+        };
         info!(
-            "  {:25} → {}",
-            DatasetType::from_filename(p).label(),
+            "  {:14} → {}  ({})",
+            dt.label(),
+            dest,
             p.file_name().unwrap_or_default().to_string_lossy()
         );
     }
     info!("Kafka:           {}", kafka_brokers);
-    info!("Topic:           {}", args.topic);
     info!("Schema Registry: {}", args.schema_registry);
-    info!("Rate:            {}/sec", events_per_sec);
+    info!(
+        "Rate:            {}/sec per dataset (~{} total)",
+        events_per_sec,
+        events_per_sec * csv_files.len() as u32
+    );
+    info!(
+        "Mode:            {}",
+        if args.loop_forever {
+            "parallel infinite (Ctrl+C to stop)"
+        } else {
+            "sequential one-shot"
+        }
+    );
     if args.max_per_dataset > 0 {
         info!("Max/dataset:     {}", args.max_per_dataset);
     }
@@ -877,11 +940,31 @@ async fn main() -> Result<()> {
         schema_json.matches("\"name\"").count() - 1 // subtract the record name itself
     });
 
-    // Register schema
-    let schema_id = register_schema(&args.schema_registry, &args.topic, &schema_json)
-        .await
-        .context("Schema registration failed")?;
-    info!("✓ Schema registered with Registry (id={})", schema_id);
+    // Register schema — when using per-dataset topics, register against each topic.
+    // Schema Registry deduplicates identical schemas, so all registrations return
+    // the same schema_id; we just need the subject entries to exist.
+    let topics_to_register: Vec<String> = if args.per_dataset_topics {
+        csv_files
+            .iter()
+            .map(|p| DatasetType::from_filename(p).topic().to_string())
+            .collect()
+    } else {
+        vec![args.topic.clone()]
+    };
+
+    let schema_id = {
+        let mut id = 0u32;
+        for t in &topics_to_register {
+            id = register_schema(&args.schema_registry, t, &schema_json)
+                .await
+                .with_context(|| format!("Schema registration failed for topic {t}"))?;
+        }
+        id
+    };
+    info!(
+        "✓ Schema registered with Registry (id={schema_id}) for {} topic(s)",
+        topics_to_register.len()
+    );
 
     // Kafka producer
     let producer: FutureProducer = ClientConfig::new()
@@ -894,6 +977,74 @@ async fn main() -> Result<()> {
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     let delay_ms = 1000u64 / events_per_sec as u64;
+    let schema = Arc::new(schema);
+
+    // ── Parallel + infinite mode ───────────────────────────────────────────
+    // Each dataset gets its own tokio task that loops its CSV forever.
+    // Tasks run concurrently — no dataset blocks another.
+    if args.loop_forever {
+        info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        info!("Mode: PARALLEL INFINITE — one task per dataset, looping forever");
+        info!("Press Ctrl+C to stop all tasks");
+        info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+        let mut join_set = tokio::task::JoinSet::new();
+
+        for path in csv_files {
+            let schema = Arc::clone(&schema);
+            let producer = producer.clone();
+            let dataset_type = DatasetType::from_filename(&path);
+            let topic = if args.per_dataset_topics {
+                dataset_type.topic().to_string()
+            } else {
+                args.topic.clone()
+            };
+            let max_per_dataset = args.max_per_dataset;
+            let label = dataset_type.label();
+
+            info!(
+                "▶ Spawning [{label}] → topic={topic}  file={}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            );
+
+            join_set.spawn(async move {
+                loop {
+                    let mut local_total = 0usize;
+                    match stream_csv(
+                        &path,
+                        &dataset_type,
+                        Arc::clone(&schema),
+                        schema_id,
+                        &producer,
+                        &topic,
+                        delay_ms,
+                        max_per_dataset,
+                        &mut local_total,
+                        0, // no global cap in loop mode
+                    )
+                    .await
+                    {
+                        Ok((read, published)) => {
+                            info!("[{label}] cycle done — read: {read}, published: {published} — restarting...");
+                        }
+                        Err(e) => {
+                            error!("[{label}] error: {e:#} — retrying in 5 s...");
+                            sleep(Duration::from_secs(5)).await;
+                        }
+                    }
+                }
+            });
+        }
+
+        while let Some(res) = join_set.join_next().await {
+            if let Err(e) = res {
+                error!("Task panicked: {e}");
+            }
+        }
+        return Ok(());
+    }
+
+    // ── Sequential one-shot mode (original behaviour) ──────────────────────
     let mut total_published = 0usize;
     let mut grand_total_read = 0usize;
 
@@ -913,7 +1064,7 @@ async fn main() -> Result<()> {
         let (read, published) = stream_csv(
             path,
             &dataset_type,
-            &schema,
+            Arc::clone(&schema),
             schema_id,
             &producer,
             &args.topic,

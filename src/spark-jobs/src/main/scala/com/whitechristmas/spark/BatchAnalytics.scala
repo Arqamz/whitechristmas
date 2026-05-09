@@ -392,7 +392,7 @@ object BatchAnalytics {
 
     // Build centroid DataFrame
     val centroidRows =
-      kmeansModel.clusterCenters().zipWithIndex.map { case (center, i) =>
+      kmeansModel.clusterCenters.zipWithIndex.map { case (center, i) =>
         Row(i, center(0), center(1))
       }
     val centroidSchema = StructType(

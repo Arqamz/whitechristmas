@@ -14,15 +14,26 @@ const DistrictMap = dynamic(() => import('./components/DistrictMap'), {
 
 interface CrimeEvent {
   event_id: string;
+  source_dataset?: string;
   victim_id?: string;
   incident_date: string;
   incident_time?: string;
   location?: string;
   district?: string;
+  crime_type?: string;
   injury_type?: string;
+  event_label?: string;
   severity?: number;
   processed_timestamp: number;
   processed_timestamp_api?: number;
+}
+
+interface DatasetStat {
+  dataset: string;
+  total_events: number;
+  avg_severity: number;
+  critical_count: number;
+  last_seen: string;
 }
 
 interface Stats {
@@ -58,6 +69,30 @@ interface Correlation {
 
 const API = 'http://localhost:8081';
 const WS = 'ws://localhost:8081/ws';
+
+const DATASET_COLORS: Record<
+  string,
+  { color: string; dim: string; label: string }
+> = {
+  crimes: { color: '#ff4e42', dim: 'rgba(255,78,66,0.15)', label: 'CRIMES' },
+  violence: {
+    color: '#ff7b39',
+    dim: 'rgba(255,123,57,0.12)',
+    label: 'VIOLENCE',
+  },
+  arrests: { color: '#4d96ff', dim: 'rgba(77,150,255,0.12)', label: 'ARRESTS' },
+  'sex-offenders': {
+    color: '#7b5ea7',
+    dim: 'rgba(123,94,167,0.15)',
+    label: 'SEX OFFENDERS',
+  },
+};
+const datasetStyle = (ds?: string) =>
+  DATASET_COLORS[ds ?? ''] ?? {
+    color: '#8b949e',
+    dim: 'rgba(139,148,158,0.1)',
+    label: ds?.toUpperCase() ?? 'UNKNOWN',
+  };
 
 const SEV: Record<number, { label: string; color: string; dim: string }> = {
   5: { label: 'CRITICAL', color: '#ff4e42', dim: 'rgba(255,78,66,0.15)' },
@@ -166,11 +201,28 @@ function SeverityBadge({ severity }: { severity?: number }) {
   );
 }
 
+function DatasetBadge({ dataset }: { dataset?: string }) {
+  const ds = datasetStyle(dataset);
+  return (
+    <span
+      className="text-[9px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider"
+      style={{
+        color: ds.color,
+        background: ds.dim,
+        border: `1px solid ${ds.color}40`,
+      }}
+    >
+      {ds.label}
+    </span>
+  );
+}
+
 function AlertCard({ event }: { event: CrimeEvent }) {
   const s = sev(event.severity);
   const ts = new Date(
     event.processed_timestamp_api ?? event.processed_timestamp
   ).toLocaleTimeString('en-US', { hour12: false });
+  const label = event.event_label ?? event.crime_type ?? event.injury_type;
 
   return (
     <div
@@ -184,9 +236,12 @@ function AlertCard({ event }: { event: CrimeEvent }) {
       }}
     >
       <div className="flex items-center justify-between gap-2">
-        <code className="text-[10px] opacity-50">
-          {event.event_id.slice(0, 12)}…
-        </code>
+        <div className="flex items-center gap-1.5">
+          <DatasetBadge dataset={event.source_dataset} />
+          <code className="text-[10px] opacity-40">
+            {event.event_id.slice(0, 10)}…
+          </code>
+        </div>
         <div className="flex items-center gap-2">
           <SeverityBadge severity={event.severity} />
           <span className="opacity-40">{ts}</span>
@@ -208,10 +263,10 @@ function AlertCard({ event }: { event: CrimeEvent }) {
             <span style={{ color: 'var(--text)' }}>{event.incident_date}</span>
           </div>
         )}
-        {event.injury_type && (
+        {label && (
           <div className="col-span-2">
             <span className="opacity-50">TYPE </span>
-            <span style={{ color: s.color }}>{event.injury_type}</span>
+            <span style={{ color: s.color }}>{label}</span>
           </div>
         )}
       </div>
@@ -591,6 +646,68 @@ function CorrelationChart({ data }: { data: Correlation[] }) {
   return <div ref={ref} className="w-full h-full" />;
 }
 
+function DatasetBreakdownChart({ data }: { data: DatasetStat[] }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const sorted = [...data].sort((a, b) => b.total_events - a.total_events);
+
+  useEChart(
+    ref,
+    () => ({
+      ...CHART_BASE,
+      grid: { left: 80, right: 50, top: 4, bottom: 20 },
+      xAxis: {
+        type: 'value',
+        axisLabel: { color: '#8b949e', fontSize: 9 },
+        splitLine: { lineStyle: { color: '#1e2d3d', type: 'dashed' } },
+        minInterval: 1,
+      },
+      yAxis: {
+        type: 'category',
+        data: sorted.map((d) => d.dataset),
+        axisLine: { lineStyle: { color: '#1e2d3d' } },
+        axisTick: { show: false },
+        axisLabel: { color: '#8b949e', fontSize: 9 },
+      },
+      series: [
+        {
+          type: 'bar',
+          data: sorted.map((d) => ({
+            value: d.total_events,
+            itemStyle: {
+              color: DATASET_COLORS[d.dataset]?.color ?? '#8b949e',
+              borderRadius: [0, 2, 2, 0],
+            },
+          })),
+          barMaxWidth: 14,
+          label: {
+            show: true,
+            position: 'right',
+            color: '#8b949e',
+            fontSize: 9,
+            fontFamily: 'monospace',
+            formatter: (p: { value: number }) =>
+              p.value > 0 ? p.value.toLocaleString() : '',
+          },
+        },
+      ],
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: '#0d1117',
+        borderColor: '#1e2d3d',
+        textStyle: { color: '#c9d1d9', fontFamily: 'monospace', fontSize: 11 },
+        formatter: (params: { name: string; value: number }[]) => {
+          const d = data.find((x) => x.dataset === params[0]?.name);
+          if (!d) return '';
+          return `${d.dataset}<br/>Events: ${d.total_events.toLocaleString()}<br/>Avg severity: ${d.avg_severity.toFixed(2)}<br/>Critical: ${d.critical_count}`;
+        },
+      },
+    }),
+    [data]
+  );
+
+  return <div ref={ref} className="w-full h-full" />;
+}
+
 function EmptyChart({ label }: { label: string }) {
   return (
     <div
@@ -696,6 +813,7 @@ export default function Home() {
     CrimeTrendMonthly[]
   >([]);
   const [correlations, setCorrelations] = useState<Correlation[]>([]);
+  const [datasetStats, setDatasetStats] = useState<DatasetStat[]>([]);
   const [clock, setClock] = useState('');
 
   const tsBuffer = useRef<number[]>([]);
@@ -777,6 +895,22 @@ export default function Home() {
         if (r.ok) {
           const data = await r.json();
           setDistricts(data.districts ?? []);
+        }
+      } catch {}
+    };
+    poll();
+    const id = setInterval(poll, 15_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Dataset summary poll (15 s)
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const r = await fetch(`${API}/datasets/summary`);
+        if (r.ok) {
+          const data = await r.json();
+          setDatasetStats(data.datasets ?? []);
         }
       } catch {}
     };
@@ -1038,7 +1172,7 @@ export default function Home() {
 
       {/* Charts — row 1: live streaming data */}
       <div
-        className="flex-none grid grid-cols-3 border-t"
+        className="flex-none grid grid-cols-4 border-t"
         style={{ height: 185, borderColor: 'var(--border)' }}
       >
         <div
@@ -1081,7 +1215,10 @@ export default function Home() {
           </div>
         </div>
 
-        <div className="flex flex-col">
+        <div
+          className="flex flex-col border-r"
+          style={{ borderColor: 'var(--border)' }}
+        >
           <div
             className="flex-none px-3 pt-2 pb-0.5 text-[10px] uppercase tracking-wider"
             style={{ color: 'var(--text-muted)' }}
@@ -1094,6 +1231,23 @@ export default function Home() {
               <DistrictChart districts={districts} />
             ) : (
               <EmptyChart label="No district data yet" />
+            )}
+          </div>
+        </div>
+
+        <div className="flex flex-col">
+          <div
+            className="flex-none px-3 pt-2 pb-0.5 text-[10px] uppercase tracking-wider"
+            style={{ color: 'var(--text-muted)' }}
+          >
+            By Dataset&nbsp;
+            <span style={{ color: 'var(--text-dim)' }}>— all time</span>
+          </div>
+          <div className="flex-1 min-h-0 pb-1">
+            {datasetStats.length > 0 ? (
+              <DatasetBreakdownChart data={datasetStats} />
+            ) : (
+              <EmptyChart label="No dataset data yet" />
             )}
           </div>
         </div>

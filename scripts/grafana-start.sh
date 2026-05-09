@@ -57,7 +57,7 @@ cat >"$PROV_DIR/dashboards/whitechristmas.json" <<'DASHBOARD'
     {
       "id": 3, "gridPos": {"x":12,"y":0,"w":6,"h":4},
       "type": "stat", "title": "Kafka Messages Consumed",
-      "targets": [{"expr": "whitechristmas_kafka_messages_total", "legendFormat": ""}],
+      "targets": [{"expr": "sum(whitechristmas_kafka_messages_total)", "legendFormat": ""}],
       "options": {"colorMode": "background", "graphMode": "area"}
     },
     {
@@ -68,14 +68,26 @@ cat >"$PROV_DIR/dashboards/whitechristmas.json" <<'DASHBOARD'
     },
     {
       "id": 5, "gridPos": {"x":0,"y":4,"w":12,"h":8},
-      "type": "timeseries", "title": "Events / Second (by Severity)",
-      "targets": [{"expr": "rate(whitechristmas_events_total[1m])", "legendFormat": "sev {{severity}}"}],
+      "type": "timeseries", "title": "Events / Second — by Severity",
+      "targets": [{"expr": "sum by(severity) (rate(whitechristmas_events_total[1m]))", "legendFormat": "severity {{severity}}"}],
       "options": {"legend": {"displayMode": "list"}}
     },
     {
       "id": 6, "gridPos": {"x":12,"y":4,"w":12,"h":8},
+      "type": "timeseries", "title": "Events / Second — by Dataset",
+      "targets": [{"expr": "sum by(dataset) (rate(whitechristmas_events_total[1m]))", "legendFormat": "{{dataset}}"}],
+      "options": {"legend": {"displayMode": "list"}}
+    },
+    {
+      "id": 7, "gridPos": {"x":0,"y":12,"w":12,"h":8},
+      "type": "timeseries", "title": "Kafka Alert Consumption — by Topic",
+      "targets": [{"expr": "sum by(topic) (rate(whitechristmas_kafka_messages_total[1m]))", "legendFormat": "{{topic}}"}],
+      "options": {"legend": {"displayMode": "list"}}
+    },
+    {
+      "id": 8, "gridPos": {"x":12,"y":12,"w":12,"h":8},
       "type": "timeseries", "title": "HTTP Request Latency (p99)",
-      "targets": [{"expr": "histogram_quantile(0.99, rate(whitechristmas_http_request_duration_seconds_bucket[1m]))", "legendFormat": "p99 {{route}}"}]
+      "targets": [{"expr": "histogram_quantile(0.99, sum by(route,le) (rate(whitechristmas_http_request_duration_seconds_bucket[1m])))", "legendFormat": "p99 {{route}}"}]
     }
   ],
   "time": {"from": "now-15m", "to": "now"}
@@ -96,8 +108,8 @@ GF_PATHS_DATA="$DATA_DIR" \
   GF_AUTH_ANONYMOUS_ORG_ROLE="Admin" \
   GF_SECURITY_ADMIN_PASSWORD="admin" \
   GF_LOG_LEVEL="warn" \
-  grafana-server \
-  --homepath "$(dirname "$(which grafana-server)")/../share/grafana" \
+  grafana server \
+  --homepath "$(dirname "$(which grafana)")/../share/grafana" \
   >>"$LOG_FILE" 2>&1 &
 
 echo $! >"$PID_FILE"

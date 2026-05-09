@@ -127,19 +127,38 @@ echo -e "${GREEN}✓ Kafka Broker started successfully${NC}"
 
 # Create topics
 echo -e "${GREEN}➤ Creating Kafka topics...${NC}"
-for topic in raw-events processed-events alerts dead-letter; do
-  if "$KAFKA_HOME/bin/kafka-topics.sh" \
-    --create \
+
+# Per-dataset ingestion topics (4 partitions — Avro, Confluent wire format)
+for topic in raw-events-crimes raw-events-violence raw-events-arrests raw-events-sex-offenders; do
+  "$KAFKA_HOME/bin/kafka-topics.sh" \
+    --create --if-not-exists \
     --topic "$topic" \
     --bootstrap-server localhost:9092 \
-    --partitions 1 \
+    --partitions 4 \
     --replication-factor 1 \
-    --if-not-exists \
-    2>/dev/null; then
-    echo "  ✓ Topic '$topic' created"
-  else
-    echo "  ℹ️  Topic '$topic' already exists"
-  fi
+    2>/dev/null && echo "  ✓ $topic" || echo "  ℹ️  $topic already exists"
+done
+
+# Per-dataset alert topics (2 partitions — JSON, published by Spark)
+for topic in alerts-crimes alerts-violence alerts-arrests alerts-sex-offenders; do
+  "$KAFKA_HOME/bin/kafka-topics.sh" \
+    --create --if-not-exists \
+    --topic "$topic" \
+    --bootstrap-server localhost:9092 \
+    --partitions 2 \
+    --replication-factor 1 \
+    2>/dev/null && echo "  ✓ $topic" || echo "  ℹ️  $topic already exists"
+done
+
+# Anomaly + utility topics
+for topic in anomaly-alerts dead-letter; do
+  "$KAFKA_HOME/bin/kafka-topics.sh" \
+    --create --if-not-exists \
+    --topic "$topic" \
+    --bootstrap-server localhost:9092 \
+    --partitions 2 \
+    --replication-factor 1 \
+    2>/dev/null && echo "  ✓ $topic" || echo "  ℹ️  $topic already exists"
 done
 
 echo -e "${CYAN}════════════════════════════════════════${NC}"
@@ -157,9 +176,8 @@ echo "   $LOG_DIR/kafka.log"
 echo ""
 echo -e "${YELLOW}📡 Quick Commands:${NC}"
 echo "   kafka-topics.sh --list --bootstrap-server localhost:9092"
-echo "   kafka-topics.sh --describe --topic raw-events --bootstrap-server localhost:9092"
-echo "   echo 'test' | kafka-console-producer.sh --topic raw-events --bootstrap-server localhost:9092"
-echo "   kafka-console-consumer.sh --topic raw-events --bootstrap-server localhost:9092 --from-beginning"
+echo "   kafka-topics.sh --describe --topic raw-events-crimes --bootstrap-server localhost:9092"
+echo "   kafka-console-consumer.sh --topic alerts-crimes --bootstrap-server localhost:9092 --from-beginning"
 echo ""
 echo -e "${YELLOW}🛑 To stop:${NC}"
 echo "   nix develop -c bash scripts/kafka-stop.sh"

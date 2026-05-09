@@ -71,13 +71,27 @@ services:
       - |
         echo 'Waiting for Kafka to be ready...'
         cub kafka-ready -b kafka:9092 1 30
-        echo 'Creating topics...'
+        echo 'Creating per-dataset ingestion topics (Avro)...'
         kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 \
-          --replication-factor 1 --partitions 4 --topic raw-events
+          --replication-factor 1 --partitions 4 --topic raw-events-crimes
         kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 \
-          --replication-factor 1 --partitions 2 --topic alerts
+          --replication-factor 1 --partitions 4 --topic raw-events-violence
         kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 \
-          --replication-factor 1 --partitions 2 --topic processed-events
+          --replication-factor 1 --partitions 4 --topic raw-events-arrests
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 \
+          --replication-factor 1 --partitions 4 --topic raw-events-sex-offenders
+        echo 'Creating per-dataset alert topics (JSON)...'
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 \
+          --replication-factor 1 --partitions 2 --topic alerts-crimes
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 \
+          --replication-factor 1 --partitions 2 --topic alerts-violence
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 \
+          --replication-factor 1 --partitions 2 --topic alerts-arrests
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 \
+          --replication-factor 1 --partitions 2 --topic alerts-sex-offenders
+        echo 'Creating anomaly and utility topics...'
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 \
+          --replication-factor 1 --partitions 2 --topic anomaly-alerts
         kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 \
           --replication-factor 1 --partitions 1 --topic dead-letter
         echo 'Topics ready:'
@@ -132,6 +146,9 @@ services:
     container_name: wc-spark-streaming
     environment:
       KAFKA_BROKERS: kafka:9092
+      STREAM_INPUT_PATTERN: "raw-events-.*"
+      BOLT_INPUT_PATTERN: "raw-events-.*"
+      ANOMALY_TOPIC: anomaly-alerts
       POSTGRES_CONN_STRING: ${POSTGRES_CONN_STRING:-postgresql://whitechristmas:whitechristmas@postgres:5432/whitechristmas}
       MONGODB_CONN_STRING: ${MONGODB_CONN_STRING:-mongodb://whitechristmas:whitechristmas@mongodb:27017/whitechristmas?authSource=admin}
       AVRO_SCHEMA_PATH: /schemas/crime-event.avsc
@@ -159,7 +176,7 @@ services:
     environment:
       API_PORT: "8081"
       KAFKA_BROKERS: kafka:9092
-      ALERTS_TOPIC: alerts
+      ALERTS_TOPICS: "alerts-crimes,alerts-violence,alerts-arrests,alerts-sex-offenders"
       POSTGRES_CONN_STRING: ${POSTGRES_CONN_STRING:-postgresql://whitechristmas:whitechristmas@postgres:5432/whitechristmas}
       MONGODB_CONN_STRING: ${MONGODB_CONN_STRING:-mongodb://whitechristmas:whitechristmas@mongodb:27017/whitechristmas?authSource=admin}
     depends_on:
@@ -191,10 +208,10 @@ services:
       - kafka:9092
       - --schema-registry
       - http://schema-registry:8082
-      - --topic
-      - raw-events
+      - --loop-forever
+      - --per-dataset-topics
       - --events-per-sec
-      - "${PRODUCER_RATE:-10}"
+      - "${PRODUCER_RATE:-40}"
     volumes:
       - ./data:/data:ro
     depends_on:
@@ -231,6 +248,7 @@ services:
       - --web.enable-lifecycle
     volumes:
       - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./docker/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
       - prometheus_data:/prometheus
     depends_on:
       api:

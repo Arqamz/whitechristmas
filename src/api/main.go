@@ -31,20 +31,23 @@ import (
 // ── Prometheus metrics ────────────────────────────────────────────────────────
 
 var (
+	// Labelled by severity (1-5) and source dataset so Grafana can fan these out
+	// into per-dataset panels without additional recording rules.
 	metricEventsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "whitechristmas_events_total",
-		Help: "Total crime events received from Kafka.",
-	}, []string{"severity"})
+		Help: "Total crime events received from Kafka, by severity and source dataset.",
+	}, []string{"severity", "dataset"})
 
 	metricWSClients = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "whitechristmas_websocket_clients",
 		Help: "Number of currently connected WebSocket clients.",
 	})
 
-	metricKafkaMessages = promauto.NewCounter(prometheus.CounterOpts{
+	// Labelled by topic so per-dataset ingestion rates are independently visible.
+	metricKafkaMessages = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "whitechristmas_kafka_messages_total",
-		Help: "Total Kafka messages consumed from the alerts topic.",
-	})
+		Help: "Total Kafka messages consumed, by topic.",
+	}, []string{"topic"})
 
 	metricHTTPDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "whitechristmas_http_request_duration_seconds",
@@ -58,7 +61,7 @@ var (
 	})
 )
 
-// CrimeEvent represents a unified crime alert forwarded from Spark via the alerts topic.
+// CrimeEvent represents a unified crime alert forwarded from Spark via the alerts topics.
 // Fields cover all five Chicago public safety datasets.
 type CrimeEvent struct {
 	EventID               string  `json:"event_id"`
@@ -151,7 +154,11 @@ func (h *EventHub) BroadcastEvent(event *CrimeEvent) {
 	if event.Severity != nil {
 		sev = strconv.Itoa(*event.Severity)
 	}
-	metricEventsTotal.WithLabelValues(sev).Inc()
+	dataset := "unknown"
+	if event.SourceDataset != nil {
+		dataset = *event.SourceDataset
+	}
+	metricEventsTotal.WithLabelValues(sev, dataset).Inc()
 
 	msg := &WebSocketMessage{
 		Type:      "event",
@@ -226,12 +233,13 @@ func WebSocketHandler(hub *EventHub) http.HandlerFunc {
 	}
 }
 
-// KafkaConsumer reads from Kafka and broadcasts events
+// KafkaConsumer reads from a single Kafka topic and broadcasts events.
+// Launch one goroutine per topic for independent, parallel consumption.
 func KafkaConsumer(hub *EventHub, kafkaBrokers, topic string) {
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:        []string{kafkaBrokers},
 		Topic:          topic,
-		GroupID:        "whitechristmas-api",
+		GroupID:        "whitechristmas-api-" + topic, // isolated consumer group per topic
 		StartOffset:    kafka.LastOffset,
 		CommitInterval: time.Second,
 	})
@@ -242,26 +250,28 @@ func KafkaConsumer(hub *EventHub, kafkaBrokers, topic string) {
 	for {
 		msg, err := reader.FetchMessage(context.Background())
 		if err != nil {
-			log.Printf("Kafka read error: %v", err)
+			log.Printf("[%s] Kafka read error: %v", topic, err)
 			time.Sleep(time.Second)
 			continue
 		}
 
 		var event CrimeEvent
-		err = json.Unmarshal(msg.Value, &event)
-		if err != nil {
-			log.Printf("Failed to unmarshal event: %v", err)
+		if err := json.Unmarshal(msg.Value, &event); err != nil {
+			log.Printf("[%s] Failed to unmarshal event: %v", topic, err)
+			_ = reader.CommitMessages(context.Background(), msg)
 			continue
 		}
 
-		metricKafkaMessages.Inc()
+		metricKafkaMessages.WithLabelValues(topic).Inc()
 		hub.BroadcastEvent(&event)
 		_ = reader.CommitMessages(context.Background(), msg)
 
-		log.Printf("📨 Event #%d broadcast: %s (severity: %v)",
+		log.Printf("[%s] 📨 Event #%d broadcast: %s (severity: %v, dataset: %v)",
+			topic,
 			hub.GetEventCount(),
 			event.EventID,
-			event.Severity)
+			event.Severity,
+			event.SourceDataset)
 	}
 }
 
@@ -337,9 +347,6 @@ var (
 	mongoColl   *mongo.Collection
 )
 
-// initPostgres opens a connection pool to PostgreSQL and creates the events
-// table if it doesn't exist. Non-fatal: logs and returns nil on failure so the
-// API can still serve WebSocket traffic without a DB.
 func initPostgres(connStr string) error {
 	db, err := sql.Open("pgx", connStr)
 	if err != nil {
@@ -356,8 +363,8 @@ func initPostgres(connStr string) error {
 		return fmt.Errorf("ping: %w", err)
 	}
 
-	// Create the events table matching Spark's JDBC auto-schema.
-	// Covers all five Chicago public safety datasets via the unified Avro schema.
+	// DDL covers all five Chicago public safety datasets via the unified Avro schema.
+	// alerts table includes source_dataset for per-dataset anomaly tracking.
 	const ddl = `
 CREATE TABLE IF NOT EXISTS crime_trends (
     year         INTEGER,
@@ -391,17 +398,18 @@ CREATE TABLE IF NOT EXISTS hotspots (
     centroid_lon  DOUBLE PRECISION
 );
 CREATE TABLE IF NOT EXISTS correlations (
-    correlation_type  TEXT,
-    group_key         TEXT,
-    community_area    TEXT,
-    total_crimes      BIGINT,
-    total_arrests     BIGINT,
-    metric_a          DOUBLE PRECISION,
+    correlation_type   TEXT,
+    group_key          TEXT,
+    community_area     TEXT,
+    total_crimes       BIGINT,
+    total_arrests      BIGINT,
+    metric_a           DOUBLE PRECISION,
     violence_incidents BIGINT,
-    metric_b          DOUBLE PRECISION,
+    metric_b           DOUBLE PRECISION,
     sex_offender_count BIGINT
 );
 CREATE TABLE IF NOT EXISTS alerts (
+    source_dataset      TEXT,
     district            TEXT,
     window_start        TIMESTAMP,
     window_end          TIMESTAMP,
@@ -412,6 +420,7 @@ CREATE TABLE IF NOT EXISTS alerts (
     detected_at         TIMESTAMP,
     alert_severity      TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_alerts_source ON alerts (source_dataset);
 CREATE TABLE IF NOT EXISTS events (
     kafka_timestamp     TIMESTAMP,
     event_id            TEXT,
@@ -449,7 +458,7 @@ CREATE INDEX IF NOT EXISTS idx_events_crime_type     ON events (crime_type);`
 	return nil
 }
 
-// initMongo connects to MongoDB Atlas and pins the alerts collection.
+// initMongo connects to MongoDB and pins the alerts collection.
 func initMongo(connStr string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -472,8 +481,6 @@ func initMongo(connStr string) error {
 // ─── REST handlers ────────────────────────────────────────────────────────────
 
 // EventHistoryHandler serves GET /events/history?limit=50&offset=0&dataset=crimes
-// Returns paginated events from PostgreSQL ordered newest-first.
-// Optional ?dataset= filter narrows by source_dataset.
 func EventHistoryHandler() http.HandlerFunc {
 	type row struct {
 		EventID            string  `json:"event_id"`
@@ -564,7 +571,6 @@ func EventHistoryHandler() http.HandlerFunc {
 }
 
 // DistrictSummaryHandler serves GET /districts/summary
-// Returns event counts + avg severity per district from PostgreSQL.
 func DistrictSummaryHandler() http.HandlerFunc {
 	type districtRow struct {
 		District      string  `json:"district"`
@@ -619,7 +625,6 @@ func DistrictSummaryHandler() http.HandlerFunc {
 }
 
 // TrendsHandler serves GET /analytics/trends?hours=24
-// Returns hourly event counts + avg severity for the last N hours.
 func TrendsHandler() http.HandlerFunc {
 	type trendRow struct {
 		Hour        string  `json:"hour"`
@@ -674,8 +679,62 @@ func TrendsHandler() http.HandlerFunc {
 	}
 }
 
-// AlertsRecentHandler serves GET /alerts/recent?limit=20
-// Returns the most recent alert documents from MongoDB.
+// DatasetSummaryHandler serves GET /datasets/summary
+// Returns per-dataset event counts, avg severity, and critical event counts.
+func DatasetSummaryHandler() http.HandlerFunc {
+	type datasetRow struct {
+		Dataset       string  `json:"dataset"`
+		TotalEvents   int64   `json:"total_events"`
+		AvgSeverity   float64 `json:"avg_severity"`
+		CriticalCount int64   `json:"critical_count"`
+		LastSeen      string  `json:"last_seen"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if pgDB == nil {
+			http.Error(w, `{"error":"PostgreSQL not connected"}`, http.StatusServiceUnavailable)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		rows, err := pgDB.QueryContext(ctx, `
+			SELECT
+				COALESCE(source_dataset, 'unknown') AS dataset,
+				COUNT(*) AS total_events,
+				COALESCE(AVG(severity), 0) AS avg_severity,
+				SUM(CASE WHEN severity >= 4 THEN 1 ELSE 0 END) AS critical_count,
+				MAX(processed_at) AS last_seen
+			FROM events
+			GROUP BY source_dataset
+			ORDER BY total_events DESC`)
+		if err != nil {
+			log.Printf("datasets/summary query: %v", err)
+			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
+			return
+		}
+		defer func() { _ = rows.Close() }()
+
+		var datasets []datasetRow
+		for rows.Next() {
+			var d datasetRow
+			var lastSeen time.Time
+			if err := rows.Scan(&d.Dataset, &d.TotalEvents, &d.AvgSeverity, &d.CriticalCount, &lastSeen); err != nil {
+				continue
+			}
+			d.LastSeen = lastSeen.Format(time.RFC3339)
+			datasets = append(datasets, d)
+		}
+		if datasets == nil {
+			datasets = []datasetRow{}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"datasets": datasets})
+	}
+}
+
+// AlertsRecentHandler serves GET /alerts/recent?limit=20&dataset=crimes
 func AlertsRecentHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if mongoColl == nil {
@@ -686,15 +745,21 @@ func AlertsRecentHandler() http.HandlerFunc {
 		if limit <= 0 || limit > 200 {
 			limit = 20
 		}
+		dataset := r.URL.Query().Get("dataset")
 
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
+
+		filter := bson.D{}
+		if dataset != "" {
+			filter = bson.D{{Key: "source_dataset", Value: dataset}}
+		}
 
 		opts := options.Find().
 			SetSort(bson.D{{Key: "processed_at", Value: -1}}).
 			SetLimit(limit)
 
-		cursor, err := mongoColl.Find(ctx, bson.D{}, opts)
+		cursor, err := mongoColl.Find(ctx, filter, opts)
 		if err != nil {
 			log.Printf("alerts/recent query: %v", err)
 			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
@@ -722,7 +787,6 @@ func tableNotFound(err error) bool {
 }
 
 // CrimeTrendsHandler serves GET /analytics/crime-trends?year=YYYY
-// Returns monthly crime counts for the requested year (default: most recent).
 func CrimeTrendsHandler() http.HandlerFunc {
 	type row struct {
 		Year       int   `json:"year"`
@@ -780,7 +844,6 @@ func CrimeTrendsHandler() http.HandlerFunc {
 }
 
 // HotspotsHandler serves GET /analytics/hotspots
-// Returns K-Means cluster centroids and crime counts from the hotspots table.
 func HotspotsHandler() http.HandlerFunc {
 	type row struct {
 		ClusterID    int     `json:"cluster_id"`
@@ -890,7 +953,6 @@ func CorrelationsHandler() http.HandlerFunc {
 }
 
 // ArrestRatesHandler serves GET /analytics/arrest-rates
-// Returns top 10 crime types by arrest rate from the batch analytics job.
 func ArrestRatesHandler() http.HandlerFunc {
 	type row struct {
 		PrimaryType  string  `json:"primary_type"`
@@ -935,7 +997,6 @@ func ArrestRatesHandler() http.HandlerFunc {
 }
 
 // ViolenceHandler serves GET /analytics/violence
-// Returns homicide vs non-fatal shooting counts by month and district.
 func ViolenceHandler() http.HandlerFunc {
 	type row struct {
 		Month             int     `json:"month"`
@@ -999,9 +1060,17 @@ func main() {
 		kafkaBrokers = "localhost:9092"
 	}
 
-	alertsTopic := os.Getenv("ALERTS_TOPIC")
-	if alertsTopic == "" {
-		alertsTopic = "alerts"
+	// ALERTS_TOPICS is a comma-separated list of per-dataset alert topics.
+	// Each topic gets its own consumer goroutine and its own consumer group.
+	alertsTopicsStr := os.Getenv("ALERTS_TOPICS")
+	if alertsTopicsStr == "" {
+		alertsTopicsStr = "alerts-crimes,alerts-violence,alerts-arrests,alerts-sex-offenders"
+	}
+	alertsTopics := make([]string, 0)
+	for _, t := range strings.Split(alertsTopicsStr, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			alertsTopics = append(alertsTopics, t)
+		}
 	}
 
 	port := os.Getenv("API_PORT")
@@ -1016,9 +1085,9 @@ func main() {
 	pgConnStr := os.Getenv("POSTGRES_CONN_STRING")
 	mongoConnStr := os.Getenv("MONGODB_CONN_STRING")
 
-	fmt.Printf("📊 Kafka Brokers: %s\n", kafkaBrokers)
-	fmt.Printf("📖 Alerts Topic:  %s\n", alertsTopic)
-	fmt.Printf("🌐 API Port:      %s\n", port)
+	fmt.Printf("📊 Kafka Brokers:   %s\n", kafkaBrokers)
+	fmt.Printf("📖 Alert Topics:    %s\n", strings.Join(alertsTopics, ", "))
+	fmt.Printf("🌐 API Port:        %s\n", port)
 	fmt.Println()
 
 	// Connect to PostgreSQL
@@ -1048,8 +1117,11 @@ func main() {
 	hub := NewEventHub()
 	go hub.Run()
 
-	// Start Kafka consumer
-	go KafkaConsumer(hub, kafkaBrokers, alertsTopic)
+	// Start one Kafka consumer goroutine per alert topic.
+	// Each consumer has its own group ID so they don't compete for the same partitions.
+	for _, topic := range alertsTopics {
+		go KafkaConsumer(hub, kafkaBrokers, topic)
+	}
 
 	// Setup router
 	r := chi.NewRouter()
@@ -1065,6 +1137,7 @@ func main() {
 	// Historical / analytics REST endpoints (backed by PostgreSQL + MongoDB)
 	r.Get("/events/history", EventHistoryHandler())
 	r.Get("/districts/summary", DistrictSummaryHandler())
+	r.Get("/datasets/summary", DatasetSummaryHandler())
 	r.Get("/analytics/trends", TrendsHandler())
 	r.Get("/alerts/recent", AlertsRecentHandler())
 
@@ -1095,10 +1168,11 @@ func main() {
 		fmt.Printf("  Stats:            http://localhost:%s/stats\n", port)
 		fmt.Printf("  WebSocket:        ws://localhost:%s/ws\n", port)
 		fmt.Printf("  Prometheus:       http://localhost:%s/metrics\n", port)
-		fmt.Printf("  Event history:    http://localhost:%s/events/history\n", port)
+		fmt.Printf("  Event history:    http://localhost:%s/events/history[?dataset=crimes]\n", port)
+		fmt.Printf("  Dataset summary:  http://localhost:%s/datasets/summary\n", port)
 		fmt.Printf("  District summary: http://localhost:%s/districts/summary\n", port)
 		fmt.Printf("  Hourly trends:    http://localhost:%s/analytics/trends\n", port)
-		fmt.Printf("  Recent alerts:    http://localhost:%s/alerts/recent\n", port)
+		fmt.Printf("  Recent alerts:    http://localhost:%s/alerts/recent[?dataset=crimes]\n", port)
 		fmt.Println()
 		fmt.Println("Press Ctrl+C to stop...")
 		fmt.Println()

@@ -41,6 +41,13 @@ run / javaOptions ++= {
 // Required for javaOptions to take effect with sbt run
 fork := true
 
+// Default entry point: combined production pipeline (StreamProcessor + BoltPipeline).
+// For individual jobs:
+//   sbt "runMain com.whitechristmas.spark.StreamProcessor"
+//   sbt "runMain com.whitechristmas.spark.BoltPipeline"
+//   sbt "runMain com.whitechristmas.spark.BatchAnalytics"
+Compile / mainClass := Some("com.whitechristmas.spark.Pipeline")
+
 // ── Assembly (fat JAR for Docker) ────────────────────────────────────────────
 assembly / assemblyJarName := "whitechristmas-spark-assembly.jar"
 
