@@ -217,7 +217,7 @@ export default function DistrictMap({ districts, hotspots = [] }: Props) {
     const ro = new ResizeObserver(syncCanvas);
     ro.observe(container);
 
-    map.on('moveend zoomend viewreset', () => {
+    map.on('move zoom viewreset', () => {
       if (canvasRef.current)
         drawHeatmap(map, canvasRef.current, districtsRef.current);
     });
