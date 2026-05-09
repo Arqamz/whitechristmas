@@ -43,6 +43,10 @@ project/target/
 # Go
 dist/
 *.bin
+whitechristmas-api
+
+# TypeScript
+tsconfig.tsbuildinfo
 
 # Database
 postgres_data/

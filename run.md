@@ -470,20 +470,19 @@ nix develop -c bash scripts/kafka-stop.sh
 ## Batch Analytics (7.1 – 7.6)
 
 Reads CSV files directly and writes aggregated results to PostgreSQL.
-Requires the PostgreSQL JDBC driver.
 
 ```bash
 cd src/spark-jobs
 
-# Option A — via spark-submit (downloads driver automatically)
-spark-submit \
-  --packages org.postgresql:postgresql:42.7.3 \
-  analytics.py
+# Option A — sbt (recommended for dev; auto-loads .env)
+POSTGRES_CONN_STRING=postgresql://user:pass@host:5432/db \
+  sbt "runMain com.whitechristmas.spark.BatchAnalytics"
 
-# Option B — pass pre-downloaded JAR
+# Option B — assembled JAR via spark-submit
+sbt assembly   # produces target/scala-2.13/whitechristmas-spark-assembly-0.1.0.jar
 spark-submit \
-  --jars /path/to/postgresql-42.7.3.jar \
-  analytics.py
+  --class com.whitechristmas.spark.BatchAnalytics \
+  target/scala-2.13/whitechristmas-spark-assembly-0.1.0.jar
 ```
 
 Environment variables (override config.yaml defaults):
@@ -491,7 +490,8 @@ Environment variables (override config.yaml defaults):
 ```
 POSTGRES_CONN_STRING=postgresql://user:pass@host:5432/db
 DATA_DIR=/path/to/data          # defaults to ../../data
-CONFIG_PATH=/path/to/config.yaml
+KMEANS_K=10                     # number of K-Means clusters (section 7.5)
+MIN_CRIMES_FOR_RATE=100         # minimum crimes for arrest-rate stat (section 7.2)
 ```
 
 Tables written:
@@ -506,19 +506,23 @@ Tables written:
 
 ---
 
-## Crime Simulator — JSON Producer (Python)
+## Crime Simulator — JSON Producer (Rust, `--json-mode`)
 
-Streams the Crimes CSV row-by-row as JSON to the `crime-events` Kafka topic.
-Rate is set in `config.yaml → kafka.publication_rate`.
+Streams the Crimes CSV row-by-row as plain JSON to the `crime-events` Kafka
+topic (no Avro, no Schema Registry). Rate is set in `config.yaml →
+kafka.publication_rate`. This feed is consumed by the Bolt Pipeline below.
 
 ```bash
-pip install kafka-python pyyaml
-
 cd src/kafka-producer
-python producer.py                          # uses config.yaml defaults
-python producer.py --max-events 1000        # stop after 1000 events
-python producer.py --verbose                # debug logging
-KAFKA_BROKERS=host:9092 python producer.py  # override broker
+
+# Default: reads config.yaml, publishes to crime-events at configured rate
+cargo run -- --json-mode --config ../../config.yaml
+
+# Stop after N events
+cargo run -- --json-mode --config ../../config.yaml --max-events 1000
+
+# Override broker
+KAFKA_BROKERS=host:9092 cargo run -- --json-mode --config ../../config.yaml
 ```
 
 ---
@@ -526,20 +530,29 @@ KAFKA_BROKERS=host:9092 python producer.py  # override broker
 ## Bolt Pipeline (Streaming)
 
 Storm-inspired Spark Structured Streaming topology.
-Reads from `crime-events`, writes anomaly alerts to PostgreSQL + MongoDB.
+Reads JSON from `crime-events`, writes anomaly alerts to PostgreSQL + MongoDB.
+
+**Terminal A** — start the crime simulator:
+
+```bash
+cd src/kafka-producer
+cargo run -- --json-mode --config ../../config.yaml
+```
+
+**Terminal B** — start the bolt pipeline:
 
 ```bash
 cd src/spark-jobs
 
+# Option A — sbt
+POSTGRES_CONN_STRING=postgresql://user:pass@host:5432/db \
+MONGODB_CONN_STRING=mongodb://localhost:27017 \
+  sbt "runMain com.whitechristmas.spark.BoltPipeline"
+
+# Option B — assembled JAR
 spark-submit \
-  --packages org.postgresql:postgresql:42.7.3 \
-  pipeline.py
-```
-
-Run the crime simulator first (in a separate terminal) so the topic has data:
-
-```bash
-python src/kafka-producer/producer.py
+  --class com.whitechristmas.spark.BoltPipeline \
+  target/scala-2.13/whitechristmas-spark-assembly-0.1.0.jar
 ```
 
 Bolt configuration (edit `config.yaml`):
