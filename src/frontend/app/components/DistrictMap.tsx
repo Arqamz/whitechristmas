@@ -45,16 +45,20 @@ const DISTRICT_COORDS: Record<string, [number, number]> = {
   '025': [41.9055, -87.7567],
 };
 
-function severityColor(avg: number): string {
-  if (avg >= 4.5) return '#ff4e42';
-  if (avg >= 4.0) return '#ff7b39';
-  if (avg >= 3.0) return '#ffd93d';
-  return '#00d4ff';
+function severityColor(avg: number): [number, number, number] {
+  if (avg >= 4.5) return [255, 78, 66]; // red
+  if (avg >= 4.0) return [255, 123, 57]; // orange
+  if (avg >= 3.0) return [255, 217, 61]; // yellow
+  return [0, 212, 255]; // cyan
 }
 
 function normalizeDistrict(d: string): string {
-  // Accept "11", "011", "011 " etc.
   return d?.trim().replace(/^0+/, '').padStart(3, '0') ?? '';
+}
+
+function severityHex(avg: number): string {
+  const [r, g, b] = severityColor(avg);
+  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
 }
 
 interface Props {
@@ -62,17 +66,123 @@ interface Props {
   hotspots?: Hotspot[];
 }
 
+function drawHeatmap(
+  map: L.Map,
+  canvas: HTMLCanvasElement,
+  districts: DistrictStat[]
+) {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if (districts.length === 0) {
+    // Ghost blobs at all known district coords when no data
+    ctx.globalCompositeOperation = 'source-over';
+    Object.values(DISTRICT_COORDS).forEach((coords) => {
+      const pt = map.latLngToContainerPoint(L.latLng(coords[0], coords[1]));
+      const grad = ctx.createRadialGradient(pt.x, pt.y, 0, pt.x, pt.y, 40);
+      grad.addColorStop(0, 'rgba(30,45,61,0.5)');
+      grad.addColorStop(1, 'rgba(30,45,61,0)');
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, 40, 0, Math.PI * 2);
+      ctx.fillStyle = grad;
+      ctx.fill();
+    });
+    return;
+  }
+
+  const maxEvents = Math.max(...districts.map((d) => d.total_events), 1);
+
+  // First pass: draw additive blobs to create heat accumulation
+  ctx.globalCompositeOperation = 'lighter';
+
+  districts.forEach((d) => {
+    const key = normalizeDistrict(d.district);
+    const coords = DISTRICT_COORDS[key];
+    if (!coords) return;
+
+    const pt = map.latLngToContainerPoint(L.latLng(coords[0], coords[1]));
+    const intensity = d.total_events / maxEvents; // 0..1
+    const [r, g, b] = severityColor(d.avg_severity);
+
+    // Outer diffuse glow
+    const outerR = 80 + intensity * 70;
+    const outerGrad = ctx.createRadialGradient(
+      pt.x,
+      pt.y,
+      0,
+      pt.x,
+      pt.y,
+      outerR
+    );
+    outerGrad.addColorStop(
+      0,
+      `rgba(${r},${g},${b},${0.18 + intensity * 0.22})`
+    );
+    outerGrad.addColorStop(0.5, `rgba(${r},${g},${b},${0.07 * intensity})`);
+    outerGrad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, outerR, 0, Math.PI * 2);
+    ctx.fillStyle = outerGrad;
+    ctx.fill();
+
+    // Inner bright core
+    const coreR = 18 + intensity * 24;
+    const coreGrad = ctx.createRadialGradient(pt.x, pt.y, 0, pt.x, pt.y, coreR);
+    coreGrad.addColorStop(0, `rgba(${r},${g},${b},${0.7 + intensity * 0.3})`);
+    coreGrad.addColorStop(0.6, `rgba(${r},${g},${b},${0.3 * intensity})`);
+    coreGrad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, coreR, 0, Math.PI * 2);
+    ctx.fillStyle = coreGrad;
+    ctx.fill();
+  });
+
+  // Restore normal compositing for subsequent draws
+  ctx.globalCompositeOperation = 'source-over';
+
+  // Second pass: district label dots + district number text
+  districts.forEach((d) => {
+    const key = normalizeDistrict(d.district);
+    const coords = DISTRICT_COORDS[key];
+    if (!coords) return;
+
+    const pt = map.latLngToContainerPoint(L.latLng(coords[0], coords[1]));
+    const hex = severityHex(d.avg_severity);
+    const intensity = d.total_events / maxEvents;
+
+    // Center dot
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, 3 + intensity * 3, 0, Math.PI * 2);
+    ctx.fillStyle = hex;
+    ctx.fill();
+
+    // District label
+    ctx.font = 'bold 9px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(201,209,217,0.75)';
+    ctx.fillText(`D${parseInt(d.district, 10)}`, pt.x, pt.y - 10);
+  });
+}
+
 export default function DistrictMap({ districts, hotspots = [] }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
-  const layerRef = useRef<L.LayerGroup | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const clickLayerRef = useRef<L.LayerGroup | null>(null);
   const hotspotLayerRef = useRef<L.LayerGroup | null>(null);
+  // Store latest districts in a ref so map event handlers always see fresh data
+  const districtsRef = useRef<DistrictStat[]>(districts);
+  districtsRef.current = districts;
 
   // Init map once
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
-    const map = L.map(containerRef.current, {
+    const container = containerRef.current;
+    container.style.position = 'relative';
+
+    const map = L.map(container, {
       center: [41.85, -87.65],
       zoom: 11,
       zoomControl: false,
@@ -90,85 +200,82 @@ export default function DistrictMap({ districts, hotspots = [] }: Props) {
 
     L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-    layerRef.current = L.layerGroup().addTo(map);
+    // Canvas heatmap overlay — pointer-events:none so clicks reach the map
+    const canvas = document.createElement('canvas');
+    canvas.style.cssText =
+      'position:absolute;top:0;left:0;pointer-events:none;z-index:450;';
+    container.appendChild(canvas);
+    canvasRef.current = canvas;
+
+    const syncCanvas = () => {
+      canvas.width = container.clientWidth;
+      canvas.height = container.clientHeight;
+      drawHeatmap(map, canvas, districtsRef.current);
+    };
+    syncCanvas();
+
+    const ro = new ResizeObserver(syncCanvas);
+    ro.observe(container);
+
+    map.on('moveend zoomend viewreset', () => {
+      if (canvasRef.current)
+        drawHeatmap(map, canvasRef.current, districtsRef.current);
+    });
+
+    clickLayerRef.current = L.layerGroup().addTo(map);
     hotspotLayerRef.current = L.layerGroup().addTo(map);
     mapRef.current = map;
 
     return () => {
+      ro.disconnect();
       map.remove();
       mapRef.current = null;
-      layerRef.current = null;
+      canvasRef.current = null;
+      clickLayerRef.current = null;
       hotspotLayerRef.current = null;
     };
   }, []);
 
-  // Update markers whenever district data changes
+  // Redraw heatmap + refresh invisible popup markers whenever district data changes
   useEffect(() => {
-    if (!layerRef.current) return;
+    const map = mapRef.current;
+    const canvas = canvasRef.current;
+    if (!map || !canvas || !clickLayerRef.current) return;
 
-    layerRef.current.clearLayers();
-
-    if (districts.length === 0) {
-      // Show placeholder markers while no live data
-      Object.entries(DISTRICT_COORDS).forEach(([, coords]) => {
-        L.circleMarker(coords, {
-          radius: 6,
-          color: '#1e2d3d',
-          fillColor: '#1e2d3d',
-          fillOpacity: 0.5,
-          weight: 1,
-        }).addTo(layerRef.current!);
-      });
-      return;
-    }
-
-    const maxEvents = Math.max(...districts.map((d) => d.total_events), 1);
+    drawHeatmap(map, canvas, districts);
+    clickLayerRef.current.clearLayers();
 
     districts.forEach((d) => {
       const key = normalizeDistrict(d.district);
       const coords = DISTRICT_COORDS[key];
       if (!coords) return;
 
-      const color = severityColor(d.avg_severity);
-      const radius = 8 + (d.total_events / maxEvents) * 22;
+      const hex = severityHex(d.avg_severity);
+      const intensity =
+        d.total_events / Math.max(...districts.map((x) => x.total_events), 1);
+      const hitRadius = Math.round(20 + intensity * 20);
 
-      const marker = L.circleMarker(coords, {
-        radius,
-        color,
-        fillColor: color,
-        fillOpacity: 0.25,
-        weight: 2,
-        opacity: 0.9,
-      });
-
-      marker.bindPopup(`
-        <div style="font-family:monospace;font-size:12px;line-height:1.6">
-          <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px">
-            DISTRICT ${d.district}
-          </div>
-          <div style="color:#8b949e">Total events&nbsp;&nbsp; <span style="color:#c9d1d9">${d.total_events}</span></div>
-          <div style="color:#8b949e">Avg severity&nbsp; <span style="color:${color}">${d.avg_severity.toFixed(1)}</span></div>
-        </div>
-      `);
-
-      // Pulse ring for high-severity districts
-      if (d.avg_severity >= 4) {
-        L.circleMarker(coords, {
-          radius: radius + 6,
-          color,
-          fillColor: 'transparent',
-          fillOpacity: 0,
-          weight: 1,
-          opacity: 0.3,
-          className: 'glow-pulse',
-        }).addTo(layerRef.current!);
-      }
-
-      marker.addTo(layerRef.current!);
+      // Invisible hit area — only purpose is to bind the popup
+      L.circleMarker(coords, {
+        radius: hitRadius,
+        opacity: 0,
+        fillOpacity: 0,
+      })
+        .bindPopup(
+          `<div style="font-family:monospace;font-size:12px;line-height:1.7;min-width:140px">
+            <div style="color:${hex};font-weight:bold;margin-bottom:4px;letter-spacing:.05em">
+              DISTRICT ${parseInt(d.district, 10)}
+            </div>
+            <div style="color:#8b949e">Events&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#c9d1d9">${d.total_events.toLocaleString()}</span></div>
+            <div style="color:#8b949e">Avg severity <span style="color:${hex}">${d.avg_severity.toFixed(2)}</span></div>
+          </div>`,
+          { className: 'wc-popup' }
+        )
+        .addTo(clickLayerRef.current!);
     });
   }, [districts]);
 
-  // Render K-Means hotspot centroids as orange crosshair markers
+  // Hotspot markers — styled as labelled crosshair pins
   useEffect(() => {
     if (!hotspotLayerRef.current) return;
     hotspotLayerRef.current.clearLayers();
@@ -178,25 +285,38 @@ export default function DistrictMap({ districts, hotspots = [] }: Props) {
 
     hotspots.forEach((h) => {
       if (!h.centroid_lat || !h.centroid_lon) return;
-      const radius = 5 + (h.crime_count / maxCount) * 14;
+      const intensity = h.crime_count / maxCount;
+      const radius = 6 + intensity * 12;
 
+      // Outer ring
+      L.circleMarker([h.centroid_lat, h.centroid_lon], {
+        radius: radius + 5,
+        color: '#ff7b39',
+        fillColor: 'transparent',
+        fillOpacity: 0,
+        weight: 1,
+        opacity: 0.4,
+        dashArray: '4 3',
+      }).addTo(hotspotLayerRef.current!);
+
+      // Core marker
       L.circleMarker([h.centroid_lat, h.centroid_lon], {
         radius,
         color: '#ff7b39',
         fillColor: '#ff7b39',
-        fillOpacity: 0.18,
-        weight: 2,
-        opacity: 0.85,
-        dashArray: '4 3',
+        fillOpacity: 0.25,
+        weight: 1.5,
+        opacity: 0.9,
       })
         .bindPopup(
-          `<div style="font-family:monospace;font-size:12px;line-height:1.6">
-            <div style="color:#ff7b39;font-weight:bold;margin-bottom:4px">
+          `<div style="font-family:monospace;font-size:12px;line-height:1.7;min-width:160px">
+            <div style="color:#ff7b39;font-weight:bold;margin-bottom:4px;letter-spacing:.05em">
               HOTSPOT CLUSTER ${h.cluster_id}
             </div>
-            <div style="color:#8b949e">Crimes&nbsp;&nbsp;&nbsp; <span style="color:#c9d1d9">${h.crime_count.toLocaleString()}</span></div>
-            <div style="color:#8b949e">Types&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#c9d1d9">${h.primary_types.split(', ').slice(0, 3).join(', ')}</span></div>
-          </div>`
+            <div style="color:#8b949e">Crimes&nbsp;&nbsp; <span style="color:#c9d1d9">${h.crime_count.toLocaleString()}</span></div>
+            <div style="color:#8b949e">Types&nbsp;&nbsp;&nbsp; <span style="color:#c9d1d9">${h.primary_types.split(', ').slice(0, 3).join(', ')}</span></div>
+          </div>`,
+          { className: 'wc-popup' }
         )
         .addTo(hotspotLayerRef.current!);
     });
