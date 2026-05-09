@@ -449,8 +449,10 @@ object BatchAnalytics {
       1
     ).otherwise(0)
 
+    // Cast district to integer so "11" (crimes CSV) matches "011" (violence CSV)
     val crimeByDistrict = crimesDF
-      .groupBy(col("District").as("district"))
+      .filter(col("District").isNotNull && trim(col("District")) =!= "")
+      .groupBy(col("District").cast("int").as("district"))
       .agg(
         count("*").as("total_crimes"),
         sum(isArr).as("total_arrests")
@@ -462,7 +464,7 @@ object BatchAnalytics {
 
     val violenceByDistrict = violenceDF
       .filter(col("DISTRICT").isNotNull && trim(col("DISTRICT")) =!= "")
-      .groupBy(col("DISTRICT").as("district"))
+      .groupBy(col("DISTRICT").cast("int").as("district"))
       .agg(count("*").as("violence_incidents"))
 
     val corr1 = crimeByDistrict

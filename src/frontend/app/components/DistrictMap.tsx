@@ -269,7 +269,11 @@ export default function DistrictMap({ districts, hotspots = [] }: Props) {
             <div style="color:#8b949e">Events&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#c9d1d9">${d.total_events.toLocaleString()}</span></div>
             <div style="color:#8b949e">Avg severity <span style="color:${hex}">${d.avg_severity.toFixed(2)}</span></div>
           </div>`,
-          { className: 'wc-popup' }
+          {
+            className: 'wc-popup',
+            // Shift popup above the hit circle so it doesn't open behind the blob
+            offset: L.point(0, -(hitRadius + 8)),
+          }
         )
         .addTo(clickLayerRef.current!);
     });

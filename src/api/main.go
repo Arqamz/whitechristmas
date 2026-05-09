@@ -815,12 +815,11 @@ func tableNotFound(err error) bool {
 }
 
 // CrimeTrendsHandler serves GET /analytics/crime-trends?year=YYYY
+// Without year param: returns all-time monthly totals (12 rows, one per month).
+// With year param: returns monthly totals for that specific year only.
 func CrimeTrendsHandler() http.HandlerFunc {
 	type row struct {
-		Year       int   `json:"year"`
 		Month      int   `json:"month"`
-		DayOfWeek  int   `json:"day_of_week"`
-		Hour       int   `json:"hour"`
 		CrimeCount int64 `json:"crime_count"`
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -836,14 +835,16 @@ func CrimeTrendsHandler() http.HandlerFunc {
 		var err error
 		if year != "" {
 			qrows, err = pgDB.QueryContext(ctx,
-				`SELECT year, month, day_of_week, hour, crime_count
-				 FROM crime_trends WHERE year = $1 ORDER BY month, day_of_week, hour`, year)
+				`SELECT month, SUM(crime_count) AS crime_count
+				 FROM crime_trends WHERE year = $1
+				 GROUP BY month ORDER BY month`, year)
 		} else {
+			// Aggregate across all years so a partial current year
+			// does not truncate the month axis.
 			qrows, err = pgDB.QueryContext(ctx,
-				`SELECT year, month, day_of_week, hour, crime_count
+				`SELECT month, SUM(crime_count) AS crime_count
 				 FROM crime_trends
-				 WHERE year = (SELECT MAX(year) FROM crime_trends)
-				 ORDER BY month, day_of_week, hour`)
+				 GROUP BY month ORDER BY month`)
 		}
 		if tableNotFound(err) {
 			w.Header().Set("Content-Type", "application/json")
@@ -851,6 +852,7 @@ func CrimeTrendsHandler() http.HandlerFunc {
 			return
 		}
 		if err != nil {
+			log.Printf("analytics/crime-trends query: %v", err)
 			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
 			return
 		}
@@ -858,7 +860,7 @@ func CrimeTrendsHandler() http.HandlerFunc {
 		var results []row
 		for qrows.Next() {
 			var rw row
-			if err := qrows.Scan(&rw.Year, &rw.Month, &rw.DayOfWeek, &rw.Hour, &rw.CrimeCount); err != nil {
+			if err := qrows.Scan(&rw.Month, &rw.CrimeCount); err != nil {
 				continue
 			}
 			results = append(results, rw)
