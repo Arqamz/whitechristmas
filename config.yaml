@@ -1,0 +1,21 @@
+kafka:
+  brokers: "localhost:9092"
+  crime_topic: "crime-events"        # JSON crime simulator publishes here
+  alerts_topic: "alerts"             # existing Avro pipeline alert topic
+  publication_rate: 10               # events per second (crime simulator)
+
+pipeline:
+  window_duration_minutes: 5         # Window Bolt: sliding window size
+  slide_interval_minutes: 1          # Window Bolt: slide step
+  anomaly_threshold: 50              # Anomaly Bolt: crimes/window before alert
+  watermark_minutes: 10              # late-data tolerance for event-time windows
+
+analytics:
+  kmeans_k: 10                       # 7.5: number of K-Means clusters
+  min_crimes_for_arrest_rate: 100    # 7.2: minimum crimes for statistical significance
+
+database:
+  postgres:
+    conn_string: ""    # overridden by POSTGRES_CONN_STRING env var
+  mongodb:
+    conn_string: ""    # overridden by MONGODB_CONN_STRING env var

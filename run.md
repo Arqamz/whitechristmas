@@ -464,3 +464,90 @@ nix develop -c bash scripts/kafka-stop.sh
 .local/logs/kafka.log
 .local/logs/schema-registry.log
 ```
+
+---
+
+## Batch Analytics (7.1 – 7.6)
+
+Reads CSV files directly and writes aggregated results to PostgreSQL.
+Requires the PostgreSQL JDBC driver.
+
+```bash
+cd src/spark-jobs
+
+# Option A — via spark-submit (downloads driver automatically)
+spark-submit \
+  --packages org.postgresql:postgresql:42.7.3 \
+  analytics.py
+
+# Option B — pass pre-downloaded JAR
+spark-submit \
+  --jars /path/to/postgresql-42.7.3.jar \
+  analytics.py
+```
+
+Environment variables (override config.yaml defaults):
+
+```
+POSTGRES_CONN_STRING=postgresql://user:pass@host:5432/db
+DATA_DIR=/path/to/data          # defaults to ../../data
+CONFIG_PATH=/path/to/config.yaml
+```
+
+Tables written:
+| Section | Table |
+|---------|-------|
+| 7.1 | `crime_trends` |
+| 7.2 | `arrest_rate_analysis`, `top_arrest_rate_crime_types` |
+| 7.3 | `violence_analysis`, `top_violence_community` |
+| 7.4 | `sex_offender_proximity`, `district_offender_density` |
+| 7.5 | `hotspots` |
+| 7.6 | `correlations` |
+
+---
+
+## Crime Simulator — JSON Producer (Python)
+
+Streams the Crimes CSV row-by-row as JSON to the `crime-events` Kafka topic.
+Rate is set in `config.yaml → kafka.publication_rate`.
+
+```bash
+pip install kafka-python pyyaml
+
+cd src/kafka-producer
+python producer.py                          # uses config.yaml defaults
+python producer.py --max-events 1000        # stop after 1000 events
+python producer.py --verbose                # debug logging
+KAFKA_BROKERS=host:9092 python producer.py  # override broker
+```
+
+---
+
+## Bolt Pipeline (Streaming)
+
+Storm-inspired Spark Structured Streaming topology.
+Reads from `crime-events`, writes anomaly alerts to PostgreSQL + MongoDB.
+
+```bash
+cd src/spark-jobs
+
+spark-submit \
+  --packages org.postgresql:postgresql:42.7.3 \
+  pipeline.py
+```
+
+Run the crime simulator first (in a separate terminal) so the topic has data:
+
+```bash
+python src/kafka-producer/producer.py
+```
+
+Bolt configuration (edit `config.yaml`):
+
+```yaml
+pipeline:
+  window_duration_minutes: 5 # sliding window size
+  slide_interval_minutes: 1 # slide step
+  anomaly_threshold: 50 # crimes/window before alert fires
+  watermark_minutes: 10 # late-data tolerance
+```

@@ -10,6 +10,14 @@ export interface DistrictStat {
   avg_severity: number;
 }
 
+export interface Hotspot {
+  cluster_id: number;
+  crime_count: number;
+  centroid_lat: number;
+  centroid_lon: number;
+  primary_types: string;
+}
+
 // Approximate CPD district centroids (Chicago Police Department numbered districts).
 // Keys are zero-padded 3-digit strings to match the Violence Reduction dataset format.
 const DISTRICT_COORDS: Record<string, [number, number]> = {
@@ -51,12 +59,14 @@ function normalizeDistrict(d: string): string {
 
 interface Props {
   districts: DistrictStat[];
+  hotspots?: Hotspot[];
 }
 
-export default function DistrictMap({ districts }: Props) {
+export default function DistrictMap({ districts, hotspots = [] }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const layerRef = useRef<L.LayerGroup | null>(null);
+  const hotspotLayerRef = useRef<L.LayerGroup | null>(null);
 
   // Init map once
   useEffect(() => {
@@ -81,12 +91,14 @@ export default function DistrictMap({ districts }: Props) {
     L.control.zoom({ position: 'bottomright' }).addTo(map);
 
     layerRef.current = L.layerGroup().addTo(map);
+    hotspotLayerRef.current = L.layerGroup().addTo(map);
     mapRef.current = map;
 
     return () => {
       map.remove();
       mapRef.current = null;
       layerRef.current = null;
+      hotspotLayerRef.current = null;
     };
   }, []);
 
@@ -155,6 +167,40 @@ export default function DistrictMap({ districts }: Props) {
       marker.addTo(layerRef.current!);
     });
   }, [districts]);
+
+  // Render K-Means hotspot centroids as orange crosshair markers
+  useEffect(() => {
+    if (!hotspotLayerRef.current) return;
+    hotspotLayerRef.current.clearLayers();
+    if (hotspots.length === 0) return;
+
+    const maxCount = Math.max(...hotspots.map((h) => h.crime_count), 1);
+
+    hotspots.forEach((h) => {
+      if (!h.centroid_lat || !h.centroid_lon) return;
+      const radius = 5 + (h.crime_count / maxCount) * 14;
+
+      L.circleMarker([h.centroid_lat, h.centroid_lon], {
+        radius,
+        color: '#ff7b39',
+        fillColor: '#ff7b39',
+        fillOpacity: 0.18,
+        weight: 2,
+        opacity: 0.85,
+        dashArray: '4 3',
+      })
+        .bindPopup(
+          `<div style="font-family:monospace;font-size:12px;line-height:1.6">
+            <div style="color:#ff7b39;font-weight:bold;margin-bottom:4px">
+              HOTSPOT CLUSTER ${h.cluster_id}
+            </div>
+            <div style="color:#8b949e">Crimes&nbsp;&nbsp;&nbsp; <span style="color:#c9d1d9">${h.crime_count.toLocaleString()}</span></div>
+            <div style="color:#8b949e">Types&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#c9d1d9">${h.primary_types.split(', ').slice(0, 3).join(', ')}</span></div>
+          </div>`
+        )
+        .addTo(hotspotLayerRef.current!);
+    });
+  }, [hotspots]);
 
   return (
     <div

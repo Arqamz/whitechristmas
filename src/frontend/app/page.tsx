@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import * as echarts from 'echarts';
-import type { DistrictStat } from './components/DistrictMap';
+import type { DistrictStat, Hotspot } from './components/DistrictMap';
 
 const DistrictMap = dynamic(() => import('./components/DistrictMap'), {
   ssr: false,
@@ -35,6 +35,23 @@ interface Trend {
   hour: string;
   event_count: number;
   avg_severity: number;
+}
+
+interface ArrestRate {
+  primary_type: string;
+  total_crimes: number;
+  arrest_rate: number;
+}
+
+interface CrimeTrendMonthly {
+  month: number;
+  crime_count: number;
+}
+
+interface Correlation {
+  group_key: string | null;
+  metric_a: number | null;
+  metric_b: number | null;
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -394,6 +411,186 @@ function DistrictChart({ districts }: { districts: DistrictStat[] }) {
   return <div ref={ref} className="w-full h-full" />;
 }
 
+function ArrestRatesChart({ data }: { data: ArrestRate[] }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const top = [...data].slice(0, 8).reverse();
+  useEChart(
+    ref,
+    () => ({
+      ...CHART_BASE,
+      grid: { left: 130, right: 40, top: 4, bottom: 20 },
+      xAxis: {
+        type: 'value',
+        max: 1,
+        axisLabel: {
+          color: '#8b949e',
+          fontSize: 9,
+          formatter: (v: number) => `${(v * 100).toFixed(0)}%`,
+        },
+        splitLine: { lineStyle: { color: '#1e2d3d', type: 'dashed' } },
+      },
+      yAxis: {
+        type: 'category',
+        data: top.map((d) => d.primary_type),
+        axisLine: { lineStyle: { color: '#1e2d3d' } },
+        axisTick: { show: false },
+        axisLabel: { color: '#8b949e', fontSize: 8 },
+      },
+      series: [
+        {
+          type: 'bar',
+          data: top.map((d) => ({
+            value: d.arrest_rate,
+            itemStyle: {
+              color:
+                d.arrest_rate > 0.5
+                  ? '#ff4e42'
+                  : d.arrest_rate > 0.25
+                    ? '#ffd93d'
+                    : '#3fb950',
+              borderRadius: [0, 2, 2, 0],
+            },
+          })),
+          barMaxWidth: 12,
+          label: {
+            show: true,
+            position: 'right',
+            color: '#8b949e',
+            fontSize: 8,
+            fontFamily: 'monospace',
+            formatter: (p: { value: number }) =>
+              `${(p.value * 100).toFixed(1)}%`,
+          },
+        },
+      ],
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: '#0d1117',
+        borderColor: '#1e2d3d',
+        textStyle: { color: '#c9d1d9', fontFamily: 'monospace', fontSize: 11 },
+      },
+    }),
+    [data]
+  );
+  return <div ref={ref} className="w-full h-full" />;
+}
+
+function CrimeTrendsMonthlyChart({ data }: { data: CrimeTrendMonthly[] }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const MONTHS = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+  const byMonth = Array.from({ length: 12 }, (_, i) => {
+    const rows = data.filter((d) => d.month === i + 1);
+    return rows.reduce((s, r) => s + r.crime_count, 0);
+  });
+  useEChart(
+    ref,
+    () => ({
+      ...CHART_BASE,
+      grid: { left: 36, right: 8, top: 8, bottom: 28 },
+      xAxis: {
+        type: 'category',
+        data: MONTHS,
+        axisLine: { lineStyle: { color: '#1e2d3d' } },
+        axisTick: { show: false },
+        axisLabel: { color: '#8b949e', fontSize: 9 },
+      },
+      yAxis: {
+        type: 'value',
+        axisLabel: { color: '#8b949e', fontSize: 9 },
+        splitLine: { lineStyle: { color: '#1e2d3d', type: 'dashed' } },
+        minInterval: 1,
+      },
+      series: [
+        {
+          type: 'bar',
+          data: byMonth.map((v) => ({
+            value: v,
+            itemStyle: { color: '#7b5ea7', borderRadius: [2, 2, 0, 0] },
+          })),
+          barMaxWidth: 20,
+        },
+      ],
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: '#0d1117',
+        borderColor: '#1e2d3d',
+        textStyle: { color: '#c9d1d9', fontFamily: 'monospace', fontSize: 11 },
+      },
+    }),
+    [data]
+  );
+  return <div ref={ref} className="w-full h-full" />;
+}
+
+function CorrelationChart({ data }: { data: Correlation[] }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const top = data
+    .filter((d) => d.group_key && d.metric_a != null && d.metric_b != null)
+    .slice(0, 10)
+    .reverse();
+  useEChart(
+    ref,
+    () => ({
+      ...CHART_BASE,
+      grid: { left: 40, right: 8, top: 8, bottom: 28 },
+      legend: {
+        data: ['Arrest Rate', 'Violence Rate'],
+        textStyle: { color: '#8b949e', fontSize: 8 },
+        top: 0,
+      },
+      xAxis: {
+        type: 'category',
+        data: top.map((d) => `D${d.group_key}`),
+        axisLine: { lineStyle: { color: '#1e2d3d' } },
+        axisTick: { show: false },
+        axisLabel: { color: '#8b949e', fontSize: 8 },
+      },
+      yAxis: {
+        type: 'value',
+        axisLabel: { color: '#8b949e', fontSize: 8 },
+        splitLine: { lineStyle: { color: '#1e2d3d', type: 'dashed' } },
+      },
+      series: [
+        {
+          name: 'Arrest Rate',
+          type: 'bar',
+          data: top.map((d) => d.metric_a),
+          itemStyle: { color: '#4d96ff' },
+          barMaxWidth: 10,
+        },
+        {
+          name: 'Violence Rate',
+          type: 'bar',
+          data: top.map((d) => d.metric_b),
+          itemStyle: { color: '#ff4e42' },
+          barMaxWidth: 10,
+        },
+      ],
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: '#0d1117',
+        borderColor: '#1e2d3d',
+        textStyle: { color: '#c9d1d9', fontFamily: 'monospace', fontSize: 11 },
+      },
+    }),
+    [data]
+  );
+  return <div ref={ref} className="w-full h-full" />;
+}
+
 function EmptyChart({ label }: { label: string }) {
   return (
     <div
@@ -493,6 +690,12 @@ export default function Home() {
   >('disconnected');
   const [districts, setDistricts] = useState<DistrictStat[]>([]);
   const [trends, setTrends] = useState<Trend[]>([]);
+  const [hotspots, setHotspots] = useState<Hotspot[]>([]);
+  const [arrestRates, setArrestRates] = useState<ArrestRate[]>([]);
+  const [crimeTrendsMonthly, setCrimeTrendsMonthly] = useState<
+    CrimeTrendMonthly[]
+  >([]);
+  const [correlations, setCorrelations] = useState<Correlation[]>([]);
   const [clock, setClock] = useState('');
 
   const tsBuffer = useRef<number[]>([]);
@@ -579,6 +782,29 @@ export default function Home() {
     };
     poll();
     const id = setInterval(poll, 15_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Analytics poll (5 min — batch data changes infrequently)
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const [h, a, ct, co] = await Promise.all([
+          fetch(`${API}/analytics/hotspots`).then((r) => r.json()),
+          fetch(`${API}/analytics/arrest-rates`).then((r) => r.json()),
+          fetch(`${API}/analytics/crime-trends`).then((r) => r.json()),
+          fetch(`${API}/analytics/correlations?type=district`).then((r) =>
+            r.json()
+          ),
+        ]);
+        setHotspots(h.data ?? []);
+        setArrestRates(a.data ?? []);
+        setCrimeTrendsMonthly(ct.data ?? []);
+        setCorrelations(co.data ?? []);
+      } catch {}
+    };
+    poll();
+    const id = setInterval(poll, 300_000);
     return () => clearInterval(id);
   }, []);
 
@@ -741,7 +967,7 @@ export default function Home() {
             </span>
           </div>
           <div className="flex-1 min-h-0">
-            <DistrictMap districts={districts} />
+            <DistrictMap districts={districts} hotspots={hotspots} />
           </div>
         </div>
 
@@ -810,10 +1036,10 @@ export default function Home() {
         isReplay={isReplay}
       />
 
-      {/* Charts */}
+      {/* Charts — row 1: live streaming data */}
       <div
         className="flex-none grid grid-cols-3 border-t"
-        style={{ height: 210, borderColor: 'var(--border)' }}
+        style={{ height: 185, borderColor: 'var(--border)' }}
       >
         <div
           className="flex flex-col border-r"
@@ -868,6 +1094,71 @@ export default function Home() {
               <DistrictChart districts={districts} />
             ) : (
               <EmptyChart label="No district data yet" />
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Charts — row 2: batch analytics */}
+      <div
+        className="flex-none grid grid-cols-3 border-t"
+        style={{ height: 185, borderColor: 'var(--border)' }}
+      >
+        <div
+          className="flex flex-col border-r"
+          style={{ borderColor: 'var(--border)' }}
+        >
+          <div
+            className="flex-none px-3 pt-2 pb-0.5 text-[10px] uppercase tracking-wider"
+            style={{ color: 'var(--text-muted)' }}
+          >
+            Crime Trends&nbsp;
+            <span style={{ color: 'var(--text-dim)' }}>— by month</span>
+          </div>
+          <div className="flex-1 min-h-0 pb-1 px-1">
+            {crimeTrendsMonthly.length > 0 ? (
+              <CrimeTrendsMonthlyChart data={crimeTrendsMonthly} />
+            ) : (
+              <EmptyChart label="Run BatchAnalytics to populate" />
+            )}
+          </div>
+        </div>
+        <div
+          className="flex flex-col border-r"
+          style={{ borderColor: 'var(--border)' }}
+        >
+          <div
+            className="flex-none px-3 pt-2 pb-0.5 text-[10px] uppercase tracking-wider"
+            style={{ color: 'var(--text-muted)' }}
+          >
+            Arrest Rates&nbsp;
+            <span style={{ color: 'var(--text-dim)' }}>
+              — top 10 crime types
+            </span>
+          </div>
+          <div className="flex-1 min-h-0 pb-1">
+            {arrestRates.length > 0 ? (
+              <ArrestRatesChart data={arrestRates} />
+            ) : (
+              <EmptyChart label="Run BatchAnalytics to populate" />
+            )}
+          </div>
+        </div>
+        <div className="flex flex-col">
+          <div
+            className="flex-none px-3 pt-2 pb-0.5 text-[10px] uppercase tracking-wider"
+            style={{ color: 'var(--text-muted)' }}
+          >
+            Correlations&nbsp;
+            <span style={{ color: 'var(--text-dim)' }}>
+              — arrest vs violence rate
+            </span>
+          </div>
+          <div className="flex-1 min-h-0 pb-1 px-1">
+            {correlations.length > 0 ? (
+              <CorrelationChart data={correlations} />
+            ) : (
+              <EmptyChart label="Run BatchAnalytics to populate" />
             )}
           </div>
         </div>

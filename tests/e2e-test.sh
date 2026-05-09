@@ -189,7 +189,7 @@ echo "  1. bash scripts/kafka-start.sh            # ZooKeeper + Kafka"
 echo "  2. cd src/api && go run main.go           # Go WebSocket API"
 echo "  3. cd src/spark-jobs && sbt run           # Spark stream processor"
 echo "  4. cd src/frontend && npm run dev         # Next.js dashboard"
-echo "  5. cd src/kafka-producer && go run . \\   # Push CSV events"
+echo '  5. cd src/kafka-producer && go run . \   # Push CSV events'
 echo "       -csv ../../data/Violence_Reduction*.csv -rate 5"
 echo ""
 

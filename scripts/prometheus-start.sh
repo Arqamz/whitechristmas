@@ -11,7 +11,7 @@ PORT=9090
 
 mkdir -p "$DATA_DIR" "$ROOT_DIR/.local/logs" "$ROOT_DIR/.local/pids"
 
-if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+if [[ -f $PID_FILE ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   echo "✅ Prometheus already running (PID $(cat "$PID_FILE"))"
   exit 0
 fi

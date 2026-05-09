@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -358,6 +359,59 @@ func initPostgres(connStr string) error {
 	// Create the events table matching Spark's JDBC auto-schema.
 	// Covers all five Chicago public safety datasets via the unified Avro schema.
 	const ddl = `
+CREATE TABLE IF NOT EXISTS crime_trends (
+    year         INTEGER,
+    month        INTEGER,
+    day_of_week  INTEGER,
+    hour         INTEGER,
+    crime_count  BIGINT
+);
+CREATE TABLE IF NOT EXISTS top_arrest_rate_crime_types (
+    primary_type  TEXT,
+    total_crimes  BIGINT,
+    total_arrests BIGINT,
+    arrest_rate   DOUBLE PRECISION
+);
+CREATE TABLE IF NOT EXISTS violence_analysis (
+    month                      INTEGER,
+    district                   TEXT,
+    homicides                  BIGINT,
+    non_fatal_shootings        BIGINT,
+    gunshot_incidents          BIGINT,
+    total_incidents            BIGINT,
+    gunshot_proportion_overall DOUBLE PRECISION
+);
+CREATE TABLE IF NOT EXISTS hotspots (
+    cluster_id    INTEGER,
+    crime_count   BIGINT,
+    avg_lat       DOUBLE PRECISION,
+    avg_lon       DOUBLE PRECISION,
+    primary_types TEXT,
+    centroid_lat  DOUBLE PRECISION,
+    centroid_lon  DOUBLE PRECISION
+);
+CREATE TABLE IF NOT EXISTS correlations (
+    correlation_type  TEXT,
+    group_key         TEXT,
+    community_area    TEXT,
+    total_crimes      BIGINT,
+    total_arrests     BIGINT,
+    metric_a          DOUBLE PRECISION,
+    violence_incidents BIGINT,
+    metric_b          DOUBLE PRECISION,
+    sex_offender_count BIGINT
+);
+CREATE TABLE IF NOT EXISTS alerts (
+    district            TEXT,
+    window_start        TIMESTAMP,
+    window_end          TIMESTAMP,
+    event_count         BIGINT,
+    window_first_event  TIMESTAMP,
+    window_last_event   TIMESTAMP,
+    threshold           INTEGER,
+    detected_at         TIMESTAMP,
+    alert_severity      TEXT
+);
 CREATE TABLE IF NOT EXISTS events (
     kafka_timestamp     TIMESTAMP,
     event_id            TEXT,
@@ -662,6 +716,274 @@ func AlertsRecentHandler() http.HandlerFunc {
 	}
 }
 
+// tableNotFound returns true when a query fails because the table doesn't exist yet.
+func tableNotFound(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "does not exist")
+}
+
+// CrimeTrendsHandler serves GET /analytics/crime-trends?year=YYYY
+// Returns monthly crime counts for the requested year (default: most recent).
+func CrimeTrendsHandler() http.HandlerFunc {
+	type row struct {
+		Year       int   `json:"year"`
+		Month      int   `json:"month"`
+		DayOfWeek  int   `json:"day_of_week"`
+		Hour       int   `json:"hour"`
+		CrimeCount int64 `json:"crime_count"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if pgDB == nil {
+			http.Error(w, `{"error":"PostgreSQL not connected"}`, http.StatusServiceUnavailable)
+			return
+		}
+		year := r.URL.Query().Get("year")
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
+
+		var qrows *sql.Rows
+		var err error
+		if year != "" {
+			qrows, err = pgDB.QueryContext(ctx,
+				`SELECT year, month, day_of_week, hour, crime_count
+				 FROM crime_trends WHERE year = $1 ORDER BY month, day_of_week, hour`, year)
+		} else {
+			qrows, err = pgDB.QueryContext(ctx,
+				`SELECT year, month, day_of_week, hour, crime_count
+				 FROM crime_trends
+				 WHERE year = (SELECT MAX(year) FROM crime_trends)
+				 ORDER BY month, day_of_week, hour`)
+		}
+		if tableNotFound(err) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"data": []struct{}{}, "status": "batch job not yet run"})
+			return
+		}
+		if err != nil {
+			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
+			return
+		}
+		defer qrows.Close()
+		var results []row
+		for qrows.Next() {
+			var rw row
+			if err := qrows.Scan(&rw.Year, &rw.Month, &rw.DayOfWeek, &rw.Hour, &rw.CrimeCount); err != nil {
+				continue
+			}
+			results = append(results, rw)
+		}
+		if results == nil {
+			results = []row{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"data": results})
+	}
+}
+
+// HotspotsHandler serves GET /analytics/hotspots
+// Returns K-Means cluster centroids and crime counts from the hotspots table.
+func HotspotsHandler() http.HandlerFunc {
+	type row struct {
+		ClusterID    int     `json:"cluster_id"`
+		CrimeCount   int64   `json:"crime_count"`
+		AvgLat       float64 `json:"avg_lat"`
+		AvgLon       float64 `json:"avg_lon"`
+		PrimaryTypes string  `json:"primary_types"`
+		CentroidLat  float64 `json:"centroid_lat"`
+		CentroidLon  float64 `json:"centroid_lon"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if pgDB == nil {
+			http.Error(w, `{"error":"PostgreSQL not connected"}`, http.StatusServiceUnavailable)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		qrows, err := pgDB.QueryContext(ctx,
+			`SELECT cluster_id, crime_count, avg_lat, avg_lon,
+			        COALESCE(primary_types,''), centroid_lat, centroid_lon
+			 FROM hotspots ORDER BY crime_count DESC`)
+		if tableNotFound(err) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"data": []struct{}{}, "status": "batch job not yet run"})
+			return
+		}
+		if err != nil {
+			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
+			return
+		}
+		defer qrows.Close()
+		var results []row
+		for qrows.Next() {
+			var rw row
+			if err := qrows.Scan(&rw.ClusterID, &rw.CrimeCount, &rw.AvgLat, &rw.AvgLon,
+				&rw.PrimaryTypes, &rw.CentroidLat, &rw.CentroidLon); err != nil {
+				continue
+			}
+			results = append(results, rw)
+		}
+		if results == nil {
+			results = []row{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"data": results})
+	}
+}
+
+// CorrelationsHandler serves GET /analytics/correlations?type=district|community
+func CorrelationsHandler() http.HandlerFunc {
+	type row struct {
+		CorrelationType   string   `json:"correlation_type"`
+		GroupKey          *string  `json:"group_key"`
+		CommunityArea     *string  `json:"community_area"`
+		TotalCrimes       *int64   `json:"total_crimes"`
+		MetricA           *float64 `json:"metric_a"`
+		MetricB           *float64 `json:"metric_b"`
+		ViolenceIncidents *int64   `json:"violence_incidents"`
+		SexOffenderCount  *int64   `json:"sex_offender_count"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if pgDB == nil {
+			http.Error(w, `{"error":"PostgreSQL not connected"}`, http.StatusServiceUnavailable)
+			return
+		}
+		corrType := r.URL.Query().Get("type")
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		var whereClause string
+		switch corrType {
+		case "community":
+			whereClause = `WHERE correlation_type = 'sex_offender_density_vs_crime_rate_by_community'`
+		default:
+			whereClause = `WHERE correlation_type = 'violence_rate_vs_arrest_rate_by_district'`
+		}
+
+		qrows, err := pgDB.QueryContext(ctx, fmt.Sprintf(
+			`SELECT correlation_type, group_key, community_area, total_crimes,
+			        metric_a, metric_b, violence_incidents, sex_offender_count
+			 FROM correlations %s ORDER BY total_crimes DESC NULLS LAST LIMIT 25`, whereClause))
+		if tableNotFound(err) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"data": []struct{}{}, "status": "batch job not yet run"})
+			return
+		}
+		if err != nil {
+			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
+			return
+		}
+		defer qrows.Close()
+		var results []row
+		for qrows.Next() {
+			var rw row
+			if err := qrows.Scan(&rw.CorrelationType, &rw.GroupKey, &rw.CommunityArea,
+				&rw.TotalCrimes, &rw.MetricA, &rw.MetricB, &rw.ViolenceIncidents, &rw.SexOffenderCount); err != nil {
+				continue
+			}
+			results = append(results, rw)
+		}
+		if results == nil {
+			results = []row{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"data": results})
+	}
+}
+
+// ArrestRatesHandler serves GET /analytics/arrest-rates
+// Returns top 10 crime types by arrest rate from the batch analytics job.
+func ArrestRatesHandler() http.HandlerFunc {
+	type row struct {
+		PrimaryType  string  `json:"primary_type"`
+		TotalCrimes  int64   `json:"total_crimes"`
+		TotalArrests int64   `json:"total_arrests"`
+		ArrestRate   float64 `json:"arrest_rate"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if pgDB == nil {
+			http.Error(w, `{"error":"PostgreSQL not connected"}`, http.StatusServiceUnavailable)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		qrows, err := pgDB.QueryContext(ctx,
+			`SELECT primary_type, total_crimes, total_arrests, arrest_rate
+			 FROM top_arrest_rate_crime_types ORDER BY arrest_rate DESC`)
+		if tableNotFound(err) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"data": []struct{}{}, "status": "batch job not yet run"})
+			return
+		}
+		if err != nil {
+			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
+			return
+		}
+		defer qrows.Close()
+		var results []row
+		for qrows.Next() {
+			var rw row
+			if err := qrows.Scan(&rw.PrimaryType, &rw.TotalCrimes, &rw.TotalArrests, &rw.ArrestRate); err != nil {
+				continue
+			}
+			results = append(results, rw)
+		}
+		if results == nil {
+			results = []row{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"data": results})
+	}
+}
+
+// ViolenceHandler serves GET /analytics/violence
+// Returns homicide vs non-fatal shooting counts by month and district.
+func ViolenceHandler() http.HandlerFunc {
+	type row struct {
+		Month             int     `json:"month"`
+		District          string  `json:"district"`
+		Homicides         int64   `json:"homicides"`
+		NonFatalShootings int64   `json:"non_fatal_shootings"`
+		GunShotIncidents  int64   `json:"gunshot_incidents"`
+		TotalIncidents    int64   `json:"total_incidents"`
+		GunShotProportion float64 `json:"gunshot_proportion_overall"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if pgDB == nil {
+			http.Error(w, `{"error":"PostgreSQL not connected"}`, http.StatusServiceUnavailable)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		qrows, err := pgDB.QueryContext(ctx,
+			`SELECT month, COALESCE(district,'?'), homicides, non_fatal_shootings,
+			        gunshot_incidents, total_incidents, gunshot_proportion_overall
+			 FROM violence_analysis ORDER BY month, district`)
+		if tableNotFound(err) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"data": []struct{}{}, "status": "batch job not yet run"})
+			return
+		}
+		if err != nil {
+			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
+			return
+		}
+		defer qrows.Close()
+		var results []row
+		for qrows.Next() {
+			var rw row
+			if err := qrows.Scan(&rw.Month, &rw.District, &rw.Homicides, &rw.NonFatalShootings,
+				&rw.GunShotIncidents, &rw.TotalIncidents, &rw.GunShotProportion); err != nil {
+				continue
+			}
+			results = append(results, rw)
+		}
+		if results == nil {
+			results = []row{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"data": results})
+	}
+}
+
 func main() {
 	// Load .env from project root (works from src/api/ or WhiteChristmas/)
 	for _, path := range []string{".env", "../../.env"} {
@@ -745,6 +1067,13 @@ func main() {
 	r.Get("/districts/summary", DistrictSummaryHandler())
 	r.Get("/analytics/trends", TrendsHandler())
 	r.Get("/alerts/recent", AlertsRecentHandler())
+
+	// Batch analytics endpoints (populated by BatchAnalytics Spark job)
+	r.Get("/analytics/crime-trends", CrimeTrendsHandler())
+	r.Get("/analytics/hotspots", HotspotsHandler())
+	r.Get("/analytics/correlations", CorrelationsHandler())
+	r.Get("/analytics/arrest-rates", ArrestRatesHandler())
+	r.Get("/analytics/violence", ViolenceHandler())
 
 	// Create server
 	srv := &http.Server{

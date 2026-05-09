@@ -82,7 +82,7 @@ cat >"$PROV_DIR/dashboards/whitechristmas.json" <<'DASHBOARD'
 }
 DASHBOARD
 
-if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+if [[ -f $PID_FILE ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   echo "✅ Grafana already running (PID $(cat "$PID_FILE"))"
   exit 0
 fi

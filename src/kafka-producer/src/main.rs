@@ -11,6 +11,20 @@ use tokio::time::sleep;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+// ── YAML config (for --json-mode) ─────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Default)]
+struct YamlConfig {
+    kafka: Option<KafkaYamlConfig>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct KafkaYamlConfig {
+    brokers: Option<String>,
+    crime_topic: Option<String>,
+    publication_rate: Option<u32>,
+}
+
 // ── CLI args ───────────────────────────────────────────────────────────────
 
 /// WhiteChristmas Kafka producer — all five Chicago public safety datasets → Avro → Kafka
@@ -51,6 +65,14 @@ struct Args {
     /// Maximum total events across all datasets (0 = unlimited)
     #[arg(long, default_value = "0")]
     max_events: usize,
+
+    /// Path to config.yaml — used in --json-mode for topic and rate defaults
+    #[arg(long)]
+    config: Option<PathBuf>,
+
+    /// Stream Crime CSV as JSON to crime-events topic (no Avro, no Schema Registry)
+    #[arg(long, default_value = "false")]
+    json_mode: bool,
 
     /// Verbose logging
     #[arg(short, long)]
@@ -611,6 +633,92 @@ async fn stream_csv(
     Ok((read, published))
 }
 
+// ── JSON crime simulator ───────────────────────────────────────────────────
+
+/// Stream the Crimes CSV as plain JSON to the crime-events topic.
+/// Required fields: case_number, date, block, primary_type, district,
+/// arrest, latitude, longitude.  Malformed rows are logged and discarded.
+async fn stream_json_crimes(
+    path: &PathBuf,
+    producer: &FutureProducer,
+    topic: &str,
+    delay_ms: u64,
+    max_events: usize,
+) -> Result<(usize, usize)> {
+    let file = File::open(path).with_context(|| format!("Cannot open {}", path.display()))?;
+    let mut rdr = csv::Reader::from_reader(file);
+    let mut published = 0usize;
+    let mut malformed = 0usize;
+
+    for (row_num, result) in rdr.deserialize::<CrimeRow>().enumerate() {
+        if max_events > 0 && published >= max_events {
+            break;
+        }
+
+        let row: CrimeRow = match result {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Row {} malformed ({}), discarded", row_num + 1, e);
+                malformed += 1;
+                continue;
+            }
+        };
+
+        // Validate all 8 required fields — discard if any are blank
+        macro_rules! require {
+            ($opt:expr, $name:expr) => {
+                match $opt.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    Some(v) => v.to_string(),
+                    None => {
+                        warn!("Row {} missing '{}', discarded", row_num + 1, $name);
+                        malformed += 1;
+                        continue;
+                    }
+                }
+            };
+        }
+
+        let case_number = require!(row.case_number, "case_number");
+        let date = require!(row.date, "date");
+        let block = require!(row.block, "block");
+        let primary_type = require!(row.primary_type, "primary_type");
+        let district = require!(row.district, "district");
+        let arrest = require!(row.arrest, "arrest");
+        let latitude = require!(row.latitude, "latitude");
+        let longitude = require!(row.longitude, "longitude");
+
+        let msg = serde_json::json!({
+            "case_number":  case_number,
+            "date":         date,
+            "block":        block,
+            "primary_type": primary_type,
+            "district":     district,
+            "arrest":       arrest,
+            "latitude":     latitude,
+            "longitude":    longitude,
+        });
+
+        let payload = msg.to_string();
+        let rec = FutureRecord::to(topic)
+            .key(case_number.as_bytes())
+            .payload(payload.as_bytes());
+
+        match producer.send(rec, Duration::from_secs(5)).await {
+            Ok(_) => {
+                published += 1;
+                if published <= 5 || published % 500 == 0 {
+                    info!("[JSON] #{published}  case={case_number}  type={primary_type}  district={district}");
+                }
+            }
+            Err((e, _)) => warn!("Kafka send failed: {}", e),
+        }
+
+        sleep(Duration::from_millis(delay_ms)).await;
+    }
+
+    Ok((published + malformed, published))
+}
+
 // ── main ──────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -624,6 +732,79 @@ async fn main() -> Result<()> {
             tracing::Level::INFO
         })
         .init();
+
+    // ── Load config.yaml if provided (used for json_mode defaults) ───────
+    let mut yaml_brokers: Option<String> = None;
+    let mut yaml_topic: Option<String> = None;
+    let mut yaml_rate: Option<u32> = None;
+
+    if let Some(cfg_path) = &args.config {
+        let cfg_str = std::fs::read_to_string(cfg_path)
+            .with_context(|| format!("Cannot read config: {}", cfg_path.display()))?;
+        let cfg: YamlConfig =
+            serde_yaml::from_str(&cfg_str).context("Invalid YAML in config file")?;
+        if let Some(k) = cfg.kafka {
+            yaml_brokers = k.brokers;
+            yaml_topic = k.crime_topic;
+            yaml_rate = k.publication_rate;
+        }
+    }
+
+    // CLI args take precedence; config.yaml fills unset values
+    let kafka_brokers = if args.kafka_brokers != "localhost:9092" {
+        args.kafka_brokers.clone()
+    } else {
+        yaml_brokers.unwrap_or(args.kafka_brokers.clone())
+    };
+
+    let events_per_sec = yaml_rate.unwrap_or(args.events_per_sec);
+
+    // ── JSON mode — crime simulator ───────────────────────────────────────
+    if args.json_mode {
+        let topic = yaml_topic.unwrap_or_else(|| "crime-events".to_string());
+        // Override with --topic if explicitly set
+        let topic = if args.topic != "raw-events" {
+            args.topic.clone()
+        } else {
+            topic
+        };
+
+        info!("╔══════════════════════════════════════════════════════════╗");
+        info!("║  🦀 WhiteChristmas Crime Simulator — JSON Mode          ║");
+        info!("╚══════════════════════════════════════════════════════════╝");
+        info!("Kafka        : {}", kafka_brokers);
+        info!("Topic        : {}", topic);
+        info!("Rate         : {}/sec", events_per_sec);
+
+        let crimes_path = if let Some(p) = &args.csv_path {
+            p.clone()
+        } else if let Some(dir) = &args.csv_dir {
+            std::fs::read_dir(dir)?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .find(|p| DatasetType::from_filename(p) == DatasetType::Crimes)
+                .ok_or_else(|| anyhow::anyhow!("No Crimes CSV found in {:?}", dir))?
+        } else {
+            anyhow::bail!("Provide --csv-path or --csv-dir");
+        };
+
+        info!("CSV          : {}", crimes_path.display());
+
+        let producer: FutureProducer = ClientConfig::new()
+            .set("bootstrap.servers", &kafka_brokers)
+            .set("message.timeout.ms", "5000")
+            .set("acks", "1")
+            .create()
+            .context("Failed to create Kafka producer")?;
+
+        let delay_ms = 1000u64 / events_per_sec as u64;
+        let (read, published) =
+            stream_json_crimes(&crimes_path, &producer, &topic, delay_ms, args.max_events).await?;
+
+        producer.flush(Duration::from_secs(10));
+        info!("Done — read: {read}, published: {published}");
+        return Ok(());
+    }
 
     info!("╔══════════════════════════════════════════════════════════╗");
     info!("║  🦀 WhiteChristmas Kafka Producer — All Five Datasets  ║");
@@ -669,10 +850,10 @@ async fn main() -> Result<()> {
             p.file_name().unwrap_or_default().to_string_lossy()
         );
     }
-    info!("Kafka:           {}", args.kafka_brokers);
+    info!("Kafka:           {}", kafka_brokers);
     info!("Topic:           {}", args.topic);
     info!("Schema Registry: {}", args.schema_registry);
-    info!("Rate:            {}/sec", args.events_per_sec);
+    info!("Rate:            {}/sec", events_per_sec);
     if args.max_per_dataset > 0 {
         info!("Max/dataset:     {}", args.max_per_dataset);
     }
@@ -700,7 +881,7 @@ async fn main() -> Result<()> {
 
     // Kafka producer
     let producer: FutureProducer = ClientConfig::new()
-        .set("bootstrap.servers", &args.kafka_brokers)
+        .set("bootstrap.servers", &kafka_brokers)
         .set("message.timeout.ms", "5000")
         .set("acks", "1")
         .create()
@@ -708,7 +889,7 @@ async fn main() -> Result<()> {
     info!("✓ Kafka producer ready");
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    let delay_ms = 1000u64 / args.events_per_sec as u64;
+    let delay_ms = 1000u64 / events_per_sec as u64;
     let mut total_published = 0usize;
     let mut grand_total_read = 0usize;
 
