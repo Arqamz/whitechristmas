@@ -1,4 +1,4 @@
-.PHONY: help clean lint lint-js lint-nix lint-shell lint-yaml format format-check check
+.PHONY: help clean lint lint-js lint-nix lint-shell lint-yaml format format-check check report
 
 # Color output
 CYAN := \033[0;36m
@@ -24,6 +24,10 @@ help:
 	@echo "  $(GREEN)make format$(NC)             - Format all code (auto-fix)"
 	@echo "  $(GREEN)make format-check$(NC)       - Check formatting without changes"
 	@echo "  $(GREEN)make check$(NC)              - Run all checks (lint + format-check)"
+	@echo ""
+	@echo "$(YELLOW)Report:$(NC)"
+	@echo "  $(GREEN)make report$(NC)             - Build report PDF (LaTeX)"
+	@echo "  $(GREEN)make report-clean$(NC)       - Clean report build artifacts"
 	@echo ""
 	@echo "$(YELLOW)Cleanup:$(NC)"
 	@echo "  $(GREEN)make clean$(NC)              - Remove generated files"
@@ -150,6 +154,23 @@ check: lint format-check
 	@echo "$(CYAN)╔════════════════════════════════════════════════════════════════╗$(NC)"
 	@echo "$(CYAN)║            ✓ All Quality Checks Passed!                       ║$(NC)"
 	@echo "$(CYAN)╚════════════════════════════════════════════════════════════════╝$(NC)"
+	@echo ""
+
+# ============================================================================
+# Report: Build LaTeX PDF
+# ============================================================================
+report:
+	@echo "$(CYAN)Building report PDF...$(NC)"
+	@echo "$(YELLOW)─────────────────────────────────────$(NC)"
+	@cd report && latexmk -pdf -interaction=nonstopmode -halt-on-error main.tex
+	@echo "$(YELLOW)─────────────────────────────────────$(NC)"
+	@echo "$(GREEN)✓ Report built: report/main.pdf$(NC)"
+	@echo ""
+
+report-clean:
+	@echo "$(CYAN)Cleaning report build artifacts...$(NC)"
+	@cd report && latexmk -C main.tex
+	@echo "$(GREEN)✓ Report artifacts cleaned!$(NC)"
 	@echo ""
 
 # ============================================================================

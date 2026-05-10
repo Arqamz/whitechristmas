@@ -65,4 +65,7 @@ temp/
 notes/
 
 # Dataset
-data/.local/
+data/
+
+# Local runtime (logs, pids, grafana provisioning, runtime data)
+.local/
